@@ -16,7 +16,7 @@ $headers = @{ "User-Agent" = "opendoc-cli-installer" }
 try {
     $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -UseBasicParsing
 } catch {
-    Write-Error "No se pudo obtener la información de releases de $repo: $_"
+    Write-Error "No se pudo obtener la información de releases de ${repo}: $_"
     exit 1
 }
 
