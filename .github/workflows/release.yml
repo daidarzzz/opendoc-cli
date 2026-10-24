@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           name="${BINARY}-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p stage dist
-          cp "target/${{ matrix.target }}/release/${BINARY}" stage/
+          cp "target/${{ matrix.target }}/release/${BINARY}" "target/${{ matrix.target }}/release/odc" stage/
           cp README.md LICENSE stage/
           tar -czf "dist/${name}.tar.gz" -C stage .
 
@@ -71,7 +71,7 @@ jobs:
         run: |
           $name = "$env:BINARY-$env:GITHUB_REF_NAME-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path stage, dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/$env:BINARY.exe" stage/
+          Copy-Item "target/${{ matrix.target }}/release/$env:BINARY.exe", "target/${{ matrix.target }}/release/odc.exe" stage/
           Copy-Item README.md, LICENSE stage/
           Compress-Archive -Path "stage/*" -DestinationPath "dist/$name.zip"
 

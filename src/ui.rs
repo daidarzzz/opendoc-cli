@@ -16,6 +16,8 @@ pub const DOCSET: Style = Style::new().fg_color(Some(Color::Ansi256(Ansi256Color
 pub const KIND: Style = Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(116))));
 /// Texto tenue (`#9399b2`): metadatos y rutas.
 pub const MUTED: Style = Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(103))));
+/// Melocotón (`#fab387`): literales y valores.
+pub const PEACH: Style = Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(216))));
 /// Rojo (`#f38ba8`): errores.
 pub const ERROR: Style = Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(211))));
 /// Negrita.
@@ -63,9 +65,63 @@ pub fn visible_width(text: &str) -> usize {
     text.chars().count()
 }
 
+/// Devuelve una etiqueta corta y estilizada para el tipo de entrada de Dash/Zeal
+/// (`[fn]`, `[cls]`, `[prop]`, `[guide]`, `[var]`, etc.).
+pub fn compact_kind_badge(kind: &str) -> String {
+    let lower = kind.trim().to_lowercase();
+    let tag = match lower.as_str() {
+        "function" | "func" | "method" | "clm" | "instm" | "procedure" | "callback"
+        | "operator" => "fn",
+        "class" | "cl" => "cls",
+        "property" | "instp" | "clp" | "prop" | "field" | "attribute" | "attr" => "prop",
+        "guide" | "section" | "category" | "cat" | "sec" | "topic" => "guide",
+        "variable" | "var" | "global" | "constant" | "const" | "value" => "var",
+        "interface" | "intf" => "intf",
+        "type" | "tdef" | "typedef" => "type",
+        "module" | "package" | "mod" | "pkg" | "namespace" | "framework" => "mod",
+        "macro" => "macro",
+        "struct" => "struct",
+        "trait" => "trait",
+        "enum" => "enum",
+        "union" => "union",
+        "constructor" | "ctor" => "ctor",
+        "event" | "hook" => "event",
+        other => {
+            if other.chars().count() <= 5 {
+                other
+            } else {
+                let end = other
+                    .char_indices()
+                    .nth(5)
+                    .map(|(i, _)| i)
+                    .unwrap_or(other.len());
+                &other[..end]
+            }
+        }
+    };
+    format!("[{tag}]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_kind_badge_maps_known_types() {
+        assert_eq!(compact_kind_badge("Function"), "[fn]");
+        assert_eq!(compact_kind_badge("Method"), "[fn]");
+        assert_eq!(compact_kind_badge("Class"), "[cls]");
+        assert_eq!(compact_kind_badge("Property"), "[prop]");
+        assert_eq!(compact_kind_badge("Guide"), "[guide]");
+        assert_eq!(compact_kind_badge("Variable"), "[var]");
+        assert_eq!(compact_kind_badge("Constant"), "[var]");
+        assert_eq!(compact_kind_badge("Struct"), "[struct]");
+        assert_eq!(compact_kind_badge("Trait"), "[trait]");
+        assert_eq!(compact_kind_badge("Interface"), "[intf]");
+        assert_eq!(compact_kind_badge("Type"), "[type]");
+        assert_eq!(compact_kind_badge("UnknownLongType"), "[unkno]");
+        assert_eq!(compact_kind_badge("Tag"), "[tag]");
+    }
 
     #[test]
     fn truncate_keeps_short_text() {

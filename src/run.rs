@@ -1,7 +1,7 @@
 //! Implementación de los subcomandos.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -18,6 +18,8 @@ use crate::ui::{self, paint, truncate_middle, BOLD, DOCSET, KIND, MUTED, NAME};
 
 /// Tope duro de resultados (no listar el índice entero por accidente).
 const MAX_LIMIT: usize = 500;
+/// Límite de candidatos a evaluar para el subcomando `open`.
+const OPEN_CANDIDATES_LIMIT: usize = 25;
 /// Ancho máximo de la columna de nombres.
 const NAME_WIDTH: usize = 46;
 /// Ancho máximo de la columna de tipos.
@@ -41,9 +43,18 @@ pub fn run(cli: &Cli) -> Result<(), CliError> {
             *limit,
             *json,
         ),
-        Command::Open { query, docset } => {
-            open_command(&locations, &join_query(query), docset.as_deref())
-        }
+        Command::Open {
+            query,
+            docset,
+            non_interactive,
+            exact,
+        } => open_command(
+            &locations,
+            &join_query(query),
+            docset.as_deref(),
+            *non_interactive,
+            *exact,
+        ),
         Command::List { json } => list_command(&locations, *json),
     }
 }
@@ -88,6 +99,34 @@ fn filter_id(library: &Library, token: &str) -> Result<String, CliError> {
     Err(CliError::UnknownDocset(token.to_string()))
 }
 
+/// Resuelve el objetivo de la búsqueda a partir de la sintaxis `docset:query` o del flag `--docset`.
+///
+/// Si no se proporcionó `--docset`, se inspecciona si `raw_query` contiene `:`.
+/// Si el prefijo coincide con un docset cargado (id, nombre o plataforma),
+/// se extrae como filtro y se busca el resto de la cadena.
+/// Si no coincide, se mantiene la consulta original intacta.
+pub fn resolve_query_target<'a>(
+    library: &Library,
+    raw_query: &'a str,
+    explicit_docset: Option<&'a str>,
+) -> (Option<String>, &'a str) {
+    if let Some(docset) = explicit_docset {
+        return (Some(docset.to_string()), raw_query);
+    }
+
+    if let Some((posible_docset, rest)) = raw_query.split_once(':') {
+        let trimmed_docset = posible_docset.trim();
+        let trimmed_rest = rest.trim_start();
+        if !trimmed_docset.is_empty() && !trimmed_rest.is_empty() {
+            if let Ok(id) = filter_id(library, trimmed_docset) {
+                return (Some(id), trimmed_rest);
+            }
+        }
+    }
+
+    (None, raw_query)
+}
+
 /// Ejecuta la búsqueda y devuelve los aciertos ya filtrados.
 fn run_search(
     library: &Library,
@@ -110,13 +149,14 @@ fn run_search(
 /// `search`: imprime resultados (texto o JSON). Sin aciertos no es error.
 fn search_command(
     locations: &Locations,
-    query: &str,
-    docset: Option<&str>,
+    raw_query: &str,
+    explicit_docset: Option<&str>,
     limit: usize,
     json: bool,
 ) -> Result<(), CliError> {
     let library = load(locations)?;
-    let results = run_search(&library, query, docset, limit)?;
+    let (docset, query) = resolve_query_target(&library, raw_query, explicit_docset);
+    let results = run_search(&library, query, docset.as_deref(), limit)?;
     let mut out = String::new();
     if json {
         out.push_str(
@@ -124,7 +164,7 @@ fn search_command(
         );
         out.push('\n');
     } else {
-        out.push_str(&render_search(query, &results, library.entries.len()));
+        out.push_str(&render_search(raw_query, &results, library.entries.len()));
     }
     write_stdout(&out)
 }
@@ -170,13 +210,23 @@ fn list_command(locations: &Locations, json: bool) -> Result<(), CliError> {
     write_stdout(&out)
 }
 
-/// `open`: resuelve la mejor coincidencia y la abre con el sistema.
-fn open_command(locations: &Locations, query: &str, docset: Option<&str>) -> Result<(), CliError> {
-    let library = load(locations)?;
-    let results = run_search(&library, query, docset, 1)?;
-    let Some(hit) = results.first() else {
-        return Err(CliError::NoMatch(query.to_string()));
-    };
+#[derive(Clone, Debug)]
+struct OpenCandidate(SearchResult);
+
+impl std::fmt::Display for OpenCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let badge = ui::compact_kind_badge(&self.0.kind);
+        write!(
+            f,
+            "{:<8} {:<36} [{}]",
+            badge,
+            truncate_middle(&self.0.name, 36),
+            self.0.docset_id
+        )
+    }
+}
+
+fn launch_entry(library: &Library, hit: &SearchResult) -> Result<(), CliError> {
     let Some(docset) = library.docset(&hit.docset_id) else {
         return Err(CliError::NoDocuments {
             id: hit.docset_id.clone(),
@@ -195,9 +245,10 @@ fn open_command(locations: &Locations, query: &str, docset: Option<&str>) -> Res
     })?;
     let url = docset_url(&hit.docset_id, &hit.path);
     let mut out = String::new();
+    let badge = ui::compact_kind_badge(&hit.kind);
     out.push_str(&format!(
         "{} {}\n",
-        paint(KIND, &hit.kind),
+        paint(KIND, &badge),
         paint(NAME, &hit.name)
     ));
     out.push_str(&format!(
@@ -215,7 +266,55 @@ fn open_command(locations: &Locations, query: &str, docset: Option<&str>) -> Res
     open_in_default(&resolved.path)
 }
 
-/// Imprime el resultado de búsqueda alineado.
+/// `open`: resuelve la coincidencia y la abre con el sistema (con selector interactivo si procede).
+fn open_command(
+    locations: &Locations,
+    raw_query: &str,
+    explicit_docset: Option<&str>,
+    non_interactive: bool,
+    exact: bool,
+) -> Result<(), CliError> {
+    let library = load(locations)?;
+    let (target_docset, query) = resolve_query_target(&library, raw_query, explicit_docset);
+    let results = run_search(
+        &library,
+        query,
+        target_docset.as_deref(),
+        OPEN_CANDIDATES_LIMIT,
+    )?;
+
+    if results.is_empty() {
+        return Err(CliError::NoMatch(raw_query.to_string()));
+    }
+
+    if results.len() == 1 {
+        return launch_entry(&library, &results[0]);
+    }
+
+    let is_tty = std::io::stdout().is_terminal();
+    if non_interactive || exact || !is_tty {
+        return launch_entry(&library, &results[0]);
+    }
+
+    let options: Vec<OpenCandidate> = results.into_iter().map(OpenCandidate).collect();
+    let prompt = "Select document to open:";
+    let selection = inquire::Select::new(prompt, options)
+        .with_vim_mode(true)
+        .prompt();
+
+    match selection {
+        Ok(chosen) => launch_entry(&library, &chosen.0),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => Ok(()),
+        Err(e) => Err(CliError::OpenFailed {
+            path: PathBuf::from("<interactive>"),
+            source: std::io::Error::other(e.to_string()),
+        }),
+    }
+}
+
+/// Imprime el resultado de búsqueda alineado con badges compactos.
 fn render_search(query: &str, results: &[SearchResult], total_entries: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -230,29 +329,33 @@ fn render_search(query: &str, results: &[SearchResult], total_entries: usize) ->
         ));
         return out;
     }
+    let badges: Vec<String> = results
+        .iter()
+        .map(|r| ui::compact_kind_badge(&r.kind))
+        .collect();
     let name_w = results
         .iter()
         .map(|r| ui::visible_width(&r.name))
         .max()
         .unwrap_or(0)
         .min(NAME_WIDTH);
-    let kind_w = results
+    let kind_w = badges
         .iter()
-        .map(|r| ui::visible_width(&r.kind))
+        .map(|b| ui::visible_width(b))
         .max()
-        .unwrap_or(0)
-        .min(KIND_WIDTH);
+        .unwrap_or(4)
+        .clamp(4, KIND_WIDTH);
     out.push_str(&format!(
         "{} {} {}\n",
         paint(BOLD, &pad("NAME", name_w)),
         paint(BOLD, &pad("KIND", kind_w)),
         paint(BOLD, "DOCSET")
     ));
-    for r in results {
+    for (r, badge) in results.iter().zip(&badges) {
         out.push_str(&format!(
             "{} {} {}\n",
             paint(NAME, &pad(&truncate_middle(&r.name, name_w), name_w)),
-            paint(KIND, &pad(&truncate_middle(&r.kind, kind_w), kind_w)),
+            paint(KIND, &pad(badge, kind_w)),
             paint(DOCSET, &truncate_middle(&r.docset_id, DOCSET_WIDTH))
         ));
     }
@@ -518,5 +621,62 @@ mod tests {
         assert_eq!(pad("abc", 5), "abc  ");
         assert_eq!(pad("abcde", 5), "abcde");
         assert_eq!(ui::visible_width(&pad("ñ", 3)), 3);
+    }
+
+    #[test]
+    fn resolve_query_target_supports_docset_prefix() {
+        let lib = library();
+        // Prefijo exacto id
+        let (docset, query) = resolve_query_target(&lib, "css:grid", None);
+        assert_eq!(docset.as_deref(), Some("css"));
+        assert_eq!(query, "grid");
+
+        // Mayúsculas/minúsculas y nombre
+        let (docset, query) = resolve_query_target(&lib, "Alpha:grid", None);
+        assert_eq!(docset.as_deref(), Some("a"));
+        assert_eq!(query, "grid");
+
+        // Sin coincidencia de docset (por ejemplo C++ std::vector) -> búsqueda normal
+        let (docset, query) = resolve_query_target(&lib, "std::vector", None);
+        assert_eq!(docset, None);
+        assert_eq!(query, "std::vector");
+
+        // Sin prefijo ':'
+        let (docset, query) = resolve_query_target(&lib, "grid", None);
+        assert_eq!(docset, None);
+        assert_eq!(query, "grid");
+
+        // Flag explícito tiene precedencia
+        let (docset, query) = resolve_query_target(&lib, "css:grid", Some("a"));
+        assert_eq!(docset.as_deref(), Some("a"));
+        assert_eq!(query, "css:grid");
+
+        // Sin término tras ':'
+        let (docset, query) = resolve_query_target(&lib, "css:", None);
+        assert_eq!(docset, None);
+        assert_eq!(query, "css:");
+    }
+
+    #[test]
+    fn render_search_uses_compact_badges() {
+        let lib = library();
+        let results = run_search(&lib, "grid", None, 10).expect("buscar");
+        let out = render_search("grid", &results, lib.entries.len());
+        assert!(out.contains("[prop]"));
+    }
+
+    #[test]
+    fn open_candidate_displays_badge_name_and_docset() {
+        let candidate = OpenCandidate(SearchResult {
+            docset_id: "css".to_string(),
+            name: "display".to_string(),
+            kind: "Property".to_string(),
+            path: "display.html".to_string(),
+            score: 100,
+        });
+        let s = candidate.to_string();
+        assert!(s.contains("[prop]"));
+        assert!(s.contains("display"));
+        assert!(s.contains("[css]"));
     }
 }

@@ -1,4 +1,4 @@
-# opendoc-cli
+# opendoc-cli / odc
 
 [![Release](https://img.shields.io/github/v/release/daidarzzz/opendoc-cli)](https://github.com/daidarzzz/opendoc-cli/releases)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
@@ -10,17 +10,49 @@ escaneo, índices SQLite (`searchIndex` y Core Data), cachés tarix y
 búsqueda difusa. Sin conexión, sin telemetría y sin dependencia de los
 servidores de Kapeli.
 
-> Los ejemplos muestran la salida en color; `anstream` la desactiva
-> automáticamente al redirigir (por ejemplo `| head` o `> salida.txt`).
+Puedes invocar la herramienta tanto con su nombre completo (`opendoc-cli`) como con el alias corto (`odc`).
+
+> Los ejemplos muestran la salida en color (paleta Catppuccin Mocha); `anstream`
+> la desactiva automáticamente si se detecta la variable `NO_COLOR` o al redirigir
+> (por ejemplo `| head` o `> salida.txt`).
 
 ## Instalación
 
-### Binarios ya compilados
+### En una sola línea (Zero-manual download)
 
-Descarga el archivo de tu plataforma desde la
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/daidarzzz/opendoc-cli/master/install.ps1 | iex
+```
+
+Descarga la última release, extrae `odc.exe` y `opendoc-cli.exe` en `$HOME\.local\bin` y añade la ruta persistentemente al PATH de usuario si aún no está presente.
+
+**Linux y macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/daidarzzz/opendoc-cli/master/install.sh | sh
+```
+
+Detecta tu sistema operativo y arquitectura (`x86_64` o `aarch64` / Apple Silicon), descarga el paquete comprimido e instala `odc` y `opendoc-cli` en `~/.local/bin`.
+
+---
+
+### Desde el código fuente (Cargo)
+
+```bash
+cargo install --git https://github.com/daidarzzz/opendoc-cli
+```
+
+Esto compilará e instalará automáticamente ambos binarios (`opendoc-cli` y `odc`) en tu carpeta de binarios de Cargo (`~/.cargo/bin`).
+
+---
+
+### Binarios ya compilados (manual)
+
+Descarga el archivo correspondiente a tu plataforma desde la
 [página de releases](https://github.com/daidarzzz/opendoc-cli/releases) y
-descomprímelo. Los binarios de release se compilan con `opt-level = "z"`,
-`lto = true` y `strip = true` (≈1,7 MB).
+descomprímelo. Los paquetes incluyen tanto `opendoc-cli` como `odc`, optimizados por tamaño (≈1,8 MB):
 
 | Plataforma | Archivo |
 | ---------- | ------- |
@@ -29,30 +61,21 @@ descomprímelo. Los binarios de release se compilan con `opt-level = "z"`,
 | macOS (Apple Silicon) | `opendoc-cli-<versión>-aarch64-apple-darwin.tar.gz` |
 | macOS (Intel) | `opendoc-cli-<versión>-x86_64-apple-darwin.tar.gz` |
 
-Linux y macOS:
-
-```bash
-tar -xzf opendoc-cli-*-x86_64-unknown-linux-gnu.tar.gz
-sudo install -m 0755 opendoc-cli /usr/local/bin/opendoc-cli
-```
-
-### Desde el código fuente
-
-```bash
-cargo install --git https://github.com/daidarzzz/opendoc-cli
-```
-
 ## Primeros pasos
 
 ```bash
 # 1. ¿Qué docsets hay instalados?
-opendoc-cli list
+odc list
 
-# 2. Busca un símbolo o propiedad y muestra los aciertos.
-opendoc-cli search grid --limit 5
+# 2. Busca con badges compactos de tipo
+odc search grid --limit 5
 
-# 3. Abre la mejor coincidencia en el visor del sistema.
-opendoc-cli open std::vector
+# 3. Sintaxis directa docset:query
+odc search css:grid
+odc open java:string
+
+# 4. Abre la mejor coincidencia o elige con el selector interactivo
+odc open std::vector
 ```
 
 ## Comandos
@@ -62,7 +85,7 @@ opendoc-cli open std::vector
 Lista los docsets cargados y los tarix todavía pendientes de extraer.
 
 ```console
-$ opendoc-cli list
+$ odc list
 docsets (2)
   css      CSS      -          1249 entries
   swift    Swift    -          9467 entries
@@ -74,38 +97,46 @@ pending tarix (2)
 
 ### `search`
 
-Búsqueda difusa por nombre de entrada, en todos los docsets o en uno solo.
+Búsqueda difusa por nombre de entrada en todos los docsets o filtrando por uno. Presenta badges compactos alineados (`[fn]`, `[cls]`, `[prop]`, `[guide]`, `[var]`, etc.).
 
 ```console
-$ opendoc-cli search grid --limit 5
+$ odc search grid --limit 5
 search "grid"
 NAME              KIND     DOCSET
-grid              Property css
-grid-area         Property css
-grid-auto-columns Property css
-grid-auto-flow    Property css
-grid-auto-rows    Property css
+grid              [prop]   css
+grid-area         [prop]   css
+grid-auto-columns [prop]   css
+grid-auto-flow    [prop]   css
+grid-auto-rows    [prop]   css
 5 result(s) · 10716 entries indexed · use `open` to launch one
 ```
 
-Restringe a un docset con `--docset` (acepta id, nombre o familia):
+#### Sintaxis directa `docset:query`
+
+Puedes prefijar cualquier búsqueda con el id o nombre del docset seguido de dos puntos:
 
 ```console
-$ opendoc-cli search color --docset css --limit 5
-search "color"
+$ odc search css:color --limit 5
+search "css:color"
 NAME        KIND     DOCSET
-color       Function css
-color       Property css
-color       Type     css
-color-mix   Function css
-color-gamut Property css
+color       [fn]     css
+color       [prop]   css
+color       [type]   css
+color-mix   [fn]     css
+color-gamut [prop]   css
 5 result(s) · 10716 entries indexed · use `open` to launch one
+```
+
+También puedes usar la flag explícita `--docset` (acepta id, nombre o plataforma):
+
+```console
+$ odc search color --docset css --limit 5
 ```
 
 Salida para máquinas con `--json`:
 
 ```console
-$ opendoc-cli search grid --json --limit 2
+$ odc search grid --json --limit 2
 [
   {
     "docset_id": "css",
@@ -126,18 +157,27 @@ $ opendoc-cli search grid --json --limit 2
 
 ### `open`
 
-Resuelve la mejor coincidencia y abre la página con la aplicación por
-defecto del sistema (`cmd /C start`, `open` o `xdg-open`).
+Abre la documentación correspondiente en el visor o navegador del sistema:
+
+1. **1 única coincidencia:** La abre directamente sin confirmación ni pausas.
+2. **Múltiples coincidencias en TTY interactiva:** Muestra un selector con flechas ↑/↓ (o `j`/`k`) para elegir cuál abrir, mostrando su tipo, nombre y docset. Si pulsas `Esc` o `Ctrl+C`, cancela limpiamente con código 0.
+3. **Modo no interactivo o scripts:** Con `--non-interactive`, `--exact` o cuando la salida estándar no es una terminal interactiva (por ejemplo tuberías), abre directamente el mejor resultado.
 
 ```console
-$ opendoc-cli open grid --docset css
-Property grid
+# Abre directamente con sintaxis rápida
+$ odc open css:grid
+[prop] grid
 docset: css  opendoc://css/developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/grid.html
 file:   /home/you/docsets/CSS.docset/Contents/Resources/Documents/developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/grid.html
-```
 
-Acepta las mismas opciones que `search` (`--docset`), sin `--limit` ni
-`--json`: siempre abre un único resultado.
+# Múltiples coincidencias (menú interactivo):
+$ odc open vector
+? Select document to open:
+> [cls]    Vector                               [java]
+  [struct] std::vec::Vec                        [rust]
+  [fn]     vector                               [cpp]
+[↑↓ to move, enter to select, type to filter]
+```
 
 ## Flags
 
@@ -151,14 +191,16 @@ o después del subcomando.
 | `--docset <DOCSET>` | `search`, `open` | Restringe la búsqueda a un docset (id, nombre o familia). |
 | `--limit <N>` | `search` | Número máximo de resultados. Por defecto `20`, tope `500`. |
 | `--json` | `search`, `list` | Emite JSON en lugar de la tabla con color. |
-| `-h`, `--help` | todos | Ayuda del comando. |
-| `-V`, `--version` | — | Versión del binario. |
+| `--non-interactive` | `open` | Desactiva el selector interactivo si hay múltiples resultados y abre el primero. |
+| `--exact` | `open` | Abre la mejor coincidencia sin interactividad. |
+| `-h`, `--help` | todos | Ayuda del comando con paleta de colores coherente. |
+| `-V`, `--version` | — | Versión del binario (`0.1.2`). |
 
 ## Códigos de salida
 
 | Código | Significado |
 | -----: | ----------- |
-| `0` | Éxito. Incluye búsquedas sin resultados (no es un error). |
+| `0` | Éxito. Incluye búsquedas sin resultados y cancelaciones voluntarias en el selector interactivo (`Esc` / `Ctrl+C`). |
 | `1` | Error de ejecución: carpeta ausente, docset desconocido, sin extraer o fallo al abrir. |
 | `2` | Error de uso: argumentos inválidos (los gestiona `clap`). |
 
@@ -181,34 +223,10 @@ documentos no estarán disponibles y `list` lo marcará como
 `(not extracted)`. Ábrelo una vez en la app y ya quedará disponible para el
 CLI.
 
-```bash
-# Apunta a una carpeta concreta sin tocar los ajustes de la app.
-opendoc-cli --docsets ~/docsets search grid
-
-# O de forma persistente para la sesión.
-export OPENDOC_DOCSETS=~/docsets
-```
-
-## Alias
-
-El binario se llama `opendoc-cli` para no chocar con el ejecutable de la
-app (que en muchos sistemas también es `opendoc`). Si quieres el nombre
-corto:
-
-```bash
-alias opendoc=opendoc-cli
-```
-
-En PowerShell:
-
-```powershell
-Set-Alias opendoc opendoc-cli
-```
-
 ## Compilar y probar
 
 ```bash
-cargo build --release          # binario: target/release/opendoc-cli
+cargo build --release --bins   # binarios: target/release/{opendoc-cli, odc}
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check

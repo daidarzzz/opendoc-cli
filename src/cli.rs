@@ -2,7 +2,21 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{builder::styling::Styles, Parser, Subcommand};
+
+use crate::ui;
+
+/// Paleta Catppuccin Mocha para la ayuda (--help).
+pub fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(ui::ACCENT.bold())
+        .usage(ui::ACCENT.bold())
+        .literal(ui::PEACH)
+        .placeholder(ui::MUTED)
+        .valid(ui::DOCSET)
+        .invalid(ui::ERROR)
+        .error(ui::ERROR.bold())
+}
 
 /// Búsqueda y apertura de docsets de Dash/Zeal fuera de línea.
 #[derive(Debug, Parser)]
@@ -11,7 +25,8 @@ use clap::{Parser, Subcommand};
     version,
     about = "Search and open offline docsets (Dash/Zeal) from the terminal",
     long_about = None,
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    styles = cli_styles()
 )]
 pub struct Cli {
     /// Carpeta que contiene los `*.docset` (por defecto: ajustes de OpenDoc).
@@ -51,6 +66,12 @@ pub enum Command {
         /// Restringe la búsqueda a un docset (id o nombre).
         #[arg(long, value_name = "DOCSET")]
         docset: Option<String>,
+        /// Desactiva el selector interactivo si hay múltiples coincidencias.
+        #[arg(long)]
+        non_interactive: bool,
+        /// Abre la mejor coincidencia directamente sin interactividad.
+        #[arg(long)]
+        exact: bool,
     },
     /// Lista los docsets instalados y los tarix pendientes.
     List {
