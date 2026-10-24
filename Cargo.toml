@@ -1,6 +1,6 @@
 [package]
 name = "opendoc-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Offline docset search and browsing from the terminal for OpenDoc"
@@ -24,3 +24,11 @@ dirs = "6"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Binario pequeño para distribuir en las releases: prioriza el tamaño.
+[profile.release]
+opt-level = "z"     # optimiza por tamaño
+lto = true          # enlazado con optimización global
+codegen-units = 1   # más optimización (compilación algo más lenta)
+panic = "abort"     # sin tablas de desenrollado
+strip = true        # sin símbolos ni metadatos de depuración

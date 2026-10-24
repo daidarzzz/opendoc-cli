@@ -1,0 +1,83 @@
+name: Release
+
+# Al crear un tag `v*` (p. ej. `v0.1.1`) se compilan los binarios de las tres
+# plataformas y se adjuntan a la release del tag.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Necesario para que `softprops/action-gh-release` pueda crear la release.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY: opendoc-cli
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Un objetivo que falle no cancela los demás: interesa publicar el resto.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          # macOS: cubre Apple Silicon y también Intel.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Caché de Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Compilar
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Empaquetar (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${BINARY}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p stage dist
+          cp "target/${{ matrix.target }}/release/${BINARY}" stage/
+          cp README.md LICENSE stage/
+          tar -czf "dist/${name}.tar.gz" -C stage .
+
+      - name: Empaquetar (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "$env:BINARY-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path stage, dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/$env:BINARY.exe" stage/
+          Copy-Item README.md, LICENSE stage/
+          Compress-Archive -Path "stage/*" -DestinationPath "dist/$name.zip"
+
+      - name: Publicar en la release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
