@@ -1,0 +1,26 @@
+[package]
+name = "opendoc-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Offline docset search and browsing from the terminal for OpenDoc"
+repository = "https://github.com/daidarzzz/opendoc-cli"
+readme = "README.md"
+
+[[bin]]
+name = "opendoc-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Núcleo compartido con la app: mismo escaneo, índices, tarix y búsqueda.
+opendoc-core = { git = "https://github.com/daidarzzz/opendoc-core", tag = "v0.1.1" }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anstyle = "1"
+anstream = "0.6"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
