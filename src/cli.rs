@@ -18,12 +18,12 @@ pub fn cli_styles() -> Styles {
         .error(ui::ERROR.bold())
 }
 
-/// Búsqueda y apertura de docsets de Dash/Zeal fuera de línea.
+/// Búsqueda y apertura de docsets fuera de línea.
 #[derive(Debug, Parser)]
 #[command(
     name = "opendoc-cli",
     version,
-    about = "Search and open offline docsets (Dash/Zeal) from the terminal",
+    about = "Search and open offline docsets from the terminal",
     long_about = None,
     disable_help_subcommand = true,
     styles = cli_styles()
@@ -72,6 +72,9 @@ pub enum Command {
         /// Abre la mejor coincidencia directamente sin interactividad.
         #[arg(long)]
         exact: bool,
+        /// Imprime solo la ruta del fichero resuelto en disco sin abrir el visor del sistema.
+        #[arg(long)]
+        path: bool,
     },
     /// Lista los docsets instalados y los tarix pendientes.
     List {

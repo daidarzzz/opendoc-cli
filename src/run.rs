@@ -48,12 +48,14 @@ pub fn run(cli: &Cli) -> Result<(), CliError> {
             docset,
             non_interactive,
             exact,
+            path,
         } => open_command(
             &locations,
             &join_query(query),
             docset.as_deref(),
             *non_interactive,
             *exact,
+            *path,
         ),
         Command::List { json } => list_command(&locations, *json),
     }
@@ -226,7 +228,11 @@ impl std::fmt::Display for OpenCandidate {
     }
 }
 
-fn launch_entry(library: &Library, hit: &SearchResult) -> Result<(), CliError> {
+fn launch_entry(
+    library: &Library,
+    hit: &SearchResult,
+    print_path_only: bool,
+) -> Result<(), CliError> {
     let Some(docset) = library.docset(&hit.docset_id) else {
         return Err(CliError::NoDocuments {
             id: hit.docset_id.clone(),
@@ -243,6 +249,9 @@ fn launch_entry(library: &Library, hit: &SearchResult) -> Result<(), CliError> {
         path: hit.path.clone(),
         reason: e.to_string(),
     })?;
+    if print_path_only {
+        return write_stdout(&format!("{}\n", resolved.path.display()));
+    }
     let url = docset_url(&hit.docset_id, &hit.path);
     let mut out = String::new();
     let badge = ui::compact_kind_badge(&hit.kind);
@@ -273,6 +282,7 @@ fn open_command(
     explicit_docset: Option<&str>,
     non_interactive: bool,
     exact: bool,
+    print_path_only: bool,
 ) -> Result<(), CliError> {
     let library = load(locations)?;
     let (target_docset, query) = resolve_query_target(&library, raw_query, explicit_docset);
@@ -288,12 +298,12 @@ fn open_command(
     }
 
     if results.len() == 1 {
-        return launch_entry(&library, &results[0]);
+        return launch_entry(&library, &results[0], print_path_only);
     }
 
     let is_tty = std::io::stdout().is_terminal();
-    if non_interactive || exact || !is_tty {
-        return launch_entry(&library, &results[0]);
+    if print_path_only || non_interactive || exact || !is_tty {
+        return launch_entry(&library, &results[0], print_path_only);
     }
 
     let options: Vec<OpenCandidate> = results.into_iter().map(OpenCandidate).collect();
@@ -303,7 +313,7 @@ fn open_command(
         .prompt();
 
     match selection {
-        Ok(chosen) => launch_entry(&library, &chosen.0),
+        Ok(chosen) => launch_entry(&library, &chosen.0, print_path_only),
         Err(
             inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
         ) => Ok(()),
