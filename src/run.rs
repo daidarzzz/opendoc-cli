@@ -12,8 +12,14 @@ use opendoc_core::resolve::resolve_request;
 use opendoc_core::search::{search, SearchIndex, SearchResult};
 
 use crate::cli::{Cli, Command};
+use crate::clip;
+use crate::context;
 use crate::error::CliError;
+use crate::pager;
 use crate::paths::{self, Locations};
+use crate::query::{self, ParsedQuery};
+use crate::render;
+use crate::tui;
 use crate::ui::{self, paint, truncate_middle, BOLD, DOCSET, KIND, MUTED, NAME};
 
 /// Tope duro de resultados (no listar el índice entero por accidente).
@@ -31,33 +37,80 @@ const DOCSET_WIDTH: usize = 12;
 pub fn run(cli: &Cli) -> Result<(), CliError> {
     let locations = paths::resolve(cli.docsets.as_deref(), cli.tarix_cache.as_deref())?;
     match &cli.command {
-        Command::Search {
+        Some(Command::Search {
             query,
             docset,
             limit,
             json,
-        } => search_command(
+        }) => search_command(
             &locations,
             &join_query(query),
             docset.as_deref(),
             *limit,
             *json,
+            cli.no_context,
         ),
-        Command::Open {
+        Some(Command::Show {
+            query,
+            docset,
+            code,
+            raw,
+            copy,
+            json,
+            width,
+        }) => show_command(
+            &locations,
+            &join_query(query),
+            docset.as_deref(),
+            ShowOpts {
+                only_code: *code,
+                raw: *raw,
+                copy: *copy,
+                json: *json,
+                width: *width,
+                no_context: cli.no_context,
+            },
+        ),
+        Some(Command::Open {
             query,
             docset,
             non_interactive,
             exact,
             path,
-        } => open_command(
+        }) => open_command(
             &locations,
             &join_query(query),
             docset.as_deref(),
             *non_interactive,
             *exact,
             *path,
+            cli.no_context,
         ),
-        Command::List { json } => list_command(&locations, *json),
+        Some(Command::Tui { docset, query }) => tui_command(
+            &locations,
+            docset.as_deref(),
+            query.as_deref(),
+            cli.no_context,
+        ),
+        Some(Command::Completions { shell }) => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(*shell, &mut cmd, "odc", &mut std::io::stdout());
+            Ok(())
+        }
+        Some(Command::List { json }) => list_command(&locations, *json),
+        None => {
+            if std::io::stdout().is_terminal() {
+                tui_command(&locations, None, None, cli.no_context)
+            } else {
+                use clap::CommandFactory;
+                let mut cmd = Cli::command();
+                cmd.print_help()
+                    .map_err(|e| CliError::Load(e.to_string()))?;
+                println!();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -101,32 +154,51 @@ fn filter_id(library: &Library, token: &str) -> Result<String, CliError> {
     Err(CliError::UnknownDocset(token.to_string()))
 }
 
-/// Resuelve el objetivo de la búsqueda a partir de la sintaxis `docset:query` o del flag `--docset`.
-///
-/// Si no se proporcionó `--docset`, se inspecciona si `raw_query` contiene `:`.
-/// Si el prefijo coincide con un docset cargado (id, nombre o plataforma),
-/// se extrae como filtro y se busca el resto de la cadena.
-/// Si no coincide, se mantiene la consulta original intacta.
-pub fn resolve_query_target<'a>(
-    library: &Library,
-    raw_query: &'a str,
-    explicit_docset: Option<&'a str>,
-) -> (Option<String>, &'a str) {
-    if let Some(docset) = explicit_docset {
-        return (Some(docset.to_string()), raw_query);
-    }
+/// Interpreta la consulta: prefijos `docset:` y `tipo:` (ver `query`).
+pub fn interpret(library: &Library, raw_query: &str, explicit_docset: Option<&str>) -> ParsedQuery {
+    let kinds = query::known_kinds(library);
+    query::parse(library, &kinds, raw_query, explicit_docset)
+}
 
-    if let Some((posible_docset, rest)) = raw_query.split_once(':') {
-        let trimmed_docset = posible_docset.trim();
-        let trimmed_rest = rest.trim_start();
-        if !trimmed_docset.is_empty() && !trimmed_rest.is_empty() {
-            if let Ok(id) = filter_id(library, trimmed_docset) {
-                return (Some(id), trimmed_rest);
-            }
+/// Ids de docsets que encajan con el proyecto del directorio actual.
+fn project_docsets(library: &Library, no_context: bool) -> Vec<String> {
+    if no_context {
+        return Vec::new();
+    }
+    std::env::current_dir()
+        .map(|cwd| context::context_docsets(library, &cwd))
+        .unwrap_or_default()
+}
+
+/// Búsqueda completa: docset, tipo y prioridad por contexto de proyecto.
+fn run_parsed(
+    library: &Library,
+    parsed: &ParsedQuery,
+    limit: usize,
+    no_context: bool,
+) -> Result<Vec<SearchResult>, CliError> {
+    let fetch = if parsed.kind.is_some() {
+        MAX_LIMIT * 4
+    } else {
+        limit.clamp(1, MAX_LIMIT) * 2
+    };
+    let mut results = run_search(library, &parsed.text, parsed.docset.as_deref(), fetch)?;
+    if let Some(k) = &parsed.kind {
+        results.retain(|r| &render::sym_kind(&r.kind, &r.path) == k);
+    }
+    if parsed.docset.is_none() {
+        let ctx = project_docsets(library, no_context);
+        if !ctx.is_empty() {
+            // Partición estable: el orden relativo se conserva.
+            let (mut first, rest): (Vec<_>, Vec<_>) = results
+                .into_iter()
+                .partition(|r| ctx.contains(&r.docset_id));
+            first.extend(rest);
+            results = first;
         }
     }
-
-    (None, raw_query)
+    results.truncate(limit.clamp(1, MAX_LIMIT));
+    Ok(results)
 }
 
 /// Ejecuta la búsqueda y devuelve los aciertos ya filtrados.
@@ -155,10 +227,11 @@ fn search_command(
     explicit_docset: Option<&str>,
     limit: usize,
     json: bool,
+    no_context: bool,
 ) -> Result<(), CliError> {
     let library = load(locations)?;
-    let (docset, query) = resolve_query_target(&library, raw_query, explicit_docset);
-    let results = run_search(&library, query, docset.as_deref(), limit)?;
+    let parsed = interpret(&library, raw_query, explicit_docset);
+    let results = run_parsed(&library, &parsed, limit, no_context)?;
     let mut out = String::new();
     if json {
         out.push_str(
@@ -254,7 +327,7 @@ fn launch_entry(
     }
     let url = docset_url(&hit.docset_id, &hit.path);
     let mut out = String::new();
-    let badge = ui::compact_kind_badge(&hit.kind);
+    let badge = format!("[{}]", render::sym_kind(&hit.kind, &hit.path));
     out.push_str(&format!(
         "{} {}\n",
         paint(KIND, &badge),
@@ -283,15 +356,11 @@ fn open_command(
     non_interactive: bool,
     exact: bool,
     print_path_only: bool,
+    no_context: bool,
 ) -> Result<(), CliError> {
     let library = load(locations)?;
-    let (target_docset, query) = resolve_query_target(&library, raw_query, explicit_docset);
-    let results = run_search(
-        &library,
-        query,
-        target_docset.as_deref(),
-        OPEN_CANDIDATES_LIMIT,
-    )?;
+    let parsed = interpret(&library, raw_query, explicit_docset);
+    let results = run_parsed(&library, &parsed, OPEN_CANDIDATES_LIMIT, no_context)?;
 
     if results.is_empty() {
         return Err(CliError::NoMatch(raw_query.to_string()));
@@ -324,6 +393,173 @@ fn open_command(
     }
 }
 
+#[derive(Serialize)]
+struct ShowJsonView<'a> {
+    /// Versión del contrato JSON.
+    version: u8,
+    name: &'a str,
+    kind: &'a str,
+    docset: &'a str,
+    signature: Option<&'a str>,
+    file_path: &'a Path,
+    code_blocks: &'a [String],
+    content: &'a str,
+}
+
+/// Opciones de `show`.
+struct ShowOpts {
+    only_code: bool,
+    raw: bool,
+    copy: bool,
+    json: bool,
+    width: Option<usize>,
+    no_context: bool,
+}
+
+/// `show` / `cat`: extrae y muestra la documentación directamente en la terminal.
+fn show_command(
+    locations: &Locations,
+    raw_query: &str,
+    explicit_docset: Option<&str>,
+    opts: ShowOpts,
+) -> Result<(), CliError> {
+    let library = load(locations)?;
+    let parsed = interpret(&library, raw_query, explicit_docset);
+    let results = run_parsed(&library, &parsed, OPEN_CANDIDATES_LIMIT, opts.no_context)?;
+
+    if results.is_empty() {
+        return Err(CliError::NoMatch(raw_query.to_string()));
+    }
+
+    // Coincidencia exacta primero (en el último segmento), o la mejor del ranking.
+    let q = parsed.text.trim();
+    let hit = results
+        .iter()
+        .find(|r| r.name.eq_ignore_ascii_case(q))
+        .unwrap_or(&results[0]);
+
+    let Some(docset) = library.docset(&hit.docset_id) else {
+        return Err(CliError::NoDocuments {
+            id: hit.docset_id.clone(),
+        });
+    };
+    let documents = docset.contents_path.join("Resources/Documents");
+    if !documents.is_dir() {
+        return Err(CliError::NoDocuments {
+            id: docset.id.clone(),
+        });
+    }
+    let file_part = hit.path.split('#').next().unwrap_or(&hit.path);
+    let resolved = resolve_request(&documents, file_part).map_err(|e| CliError::ResolveFailed {
+        id: docset.id.clone(),
+        path: hit.path.clone(),
+        reason: e.to_string(),
+    })?;
+    let html_content =
+        std::fs::read_to_string(&resolved.path).map_err(|e| CliError::ReadFailed {
+            path: resolved.path.clone(),
+            source: e,
+        })?;
+
+    let anchor = hit.path.split_once('#').map(|(_, a)| a);
+    let sk = render::sym_kind(&hit.kind, &hit.path);
+    let doc = render::parse_doc(&html_content, anchor, &hit.name, &sk, &hit.docset_id);
+    let width = opts
+        .width
+        .or_else(|| crossterm::terminal::size().ok().map(|(w, _)| w as usize))
+        .unwrap_or(90)
+        .clamp(30, 110);
+    let page_err = |e: std::io::Error| CliError::ReadFailed {
+        path: resolved.path.clone(),
+        source: e,
+    };
+
+    if opts.copy {
+        let text = if opts.only_code {
+            doc.code_blocks.join("\n\n")
+        } else {
+            doc.plain_text(width)
+        };
+        let via = clip::copy(&text).map_err(CliError::Clipboard)?;
+        write_stdout(&format!(
+            "{} Copied {} [{}] to clipboard ({via}).\n",
+            ui::paint(ui::ACCENT, "✓"),
+            hit.name,
+            hit.docset_id
+        ))?;
+        return Ok(());
+    }
+
+    if opts.json {
+        let content = doc.plain_text(width);
+        let view = ShowJsonView {
+            version: 1,
+            name: &hit.name,
+            kind: &hit.kind,
+            docset: &hit.docset_id,
+            signature: doc.signature.as_deref(),
+            file_path: &resolved.path,
+            code_blocks: &doc.code_blocks,
+            content: &content,
+        };
+        let json_str =
+            serde_json::to_string_pretty(&view).map_err(|e| CliError::Load(e.to_string()))?;
+        return write_stdout(&format!("{json_str}\n"));
+    }
+
+    if opts.only_code {
+        let mut blocks: Vec<&String> = doc.code_blocks.iter().collect();
+        if blocks.is_empty() {
+            if let Some(sig) = doc.signature.as_ref() {
+                blocks.push(sig);
+            } else {
+                return write_stdout(&format!(
+                    "{} No code examples found for {}.\n",
+                    ui::paint(ui::MUTED, "●"),
+                    hit.name
+                ));
+            }
+        }
+        let mut out = String::new();
+        for b in blocks {
+            out.push_str(&render::highlight_ansi(b, &doc.lang));
+            out.push('\n');
+        }
+        return pager::page_output(&out).map_err(page_err);
+    }
+
+    if opts.raw {
+        return write_stdout(&doc.plain_text(width));
+    }
+
+    let layout = doc.layout(width);
+    pager::page_output(&render::to_ansi(&layout.lines)).map_err(page_err)
+}
+
+/// `tui`: lanza la interfaz interactiva.
+fn tui_command(
+    locations: &Locations,
+    explicit_docset: Option<&str>,
+    initial_query: Option<&str>,
+    no_context: bool,
+) -> Result<(), CliError> {
+    let library = load(locations)?;
+    let initial_id = match explicit_docset {
+        Some(token) => Some(filter_id(&library, token)?),
+        // Sin docset explícito: si el proyecto actual tiene un único docset
+        // evidente (Cargo.toml → Rust…), se empieza filtrando por él.
+        None => {
+            let ctx = project_docsets(&library, no_context);
+            if ctx.len() == 1 {
+                ctx.into_iter().next()
+            } else {
+                None
+            }
+        }
+    };
+    tui::run_tui(&library, initial_id, initial_query.map(str::to_string))
+}
+
 /// Imprime el resultado de búsqueda alineado con badges compactos.
 fn render_search(query: &str, results: &[SearchResult], total_entries: usize) -> String {
     let mut out = String::new();
@@ -341,7 +577,7 @@ fn render_search(query: &str, results: &[SearchResult], total_entries: usize) ->
     }
     let badges: Vec<String> = results
         .iter()
-        .map(|r| ui::compact_kind_badge(&r.kind))
+        .map(|r| format!("[{}]", render::sym_kind(&r.kind, &r.path)))
         .collect();
     let name_w = results
         .iter()
@@ -467,7 +703,7 @@ fn write_stdout(text: &str) -> Result<(), CliError> {
 }
 
 /// Abre un fichero con la aplicación por defecto del sistema.
-fn open_in_default(path: &Path) -> Result<(), CliError> {
+pub(crate) fn open_in_default(path: &Path) -> Result<(), CliError> {
     let result = open_command_for(path);
     result.map_err(|source| CliError::OpenFailed {
         path: path.to_path_buf(),
@@ -634,37 +870,22 @@ mod tests {
     }
 
     #[test]
-    fn resolve_query_target_supports_docset_prefix() {
+    fn interpret_supports_docset_prefix() {
         let lib = library();
-        // Prefijo exacto id
-        let (docset, query) = resolve_query_target(&lib, "css:grid", None);
-        assert_eq!(docset.as_deref(), Some("css"));
-        assert_eq!(query, "grid");
-
-        // Mayúsculas/minúsculas y nombre
-        let (docset, query) = resolve_query_target(&lib, "Alpha:grid", None);
-        assert_eq!(docset.as_deref(), Some("a"));
-        assert_eq!(query, "grid");
-
-        // Sin coincidencia de docset (por ejemplo C++ std::vector) -> búsqueda normal
-        let (docset, query) = resolve_query_target(&lib, "std::vector", None);
-        assert_eq!(docset, None);
-        assert_eq!(query, "std::vector");
-
-        // Sin prefijo ':'
-        let (docset, query) = resolve_query_target(&lib, "grid", None);
-        assert_eq!(docset, None);
-        assert_eq!(query, "grid");
-
-        // Flag explícito tiene precedencia
-        let (docset, query) = resolve_query_target(&lib, "css:grid", Some("a"));
-        assert_eq!(docset.as_deref(), Some("a"));
-        assert_eq!(query, "css:grid");
-
-        // Sin término tras ':'
-        let (docset, query) = resolve_query_target(&lib, "css:", None);
-        assert_eq!(docset, None);
-        assert_eq!(query, "css:");
+        let p = interpret(&lib, "css:grid", None);
+        assert_eq!(p.docset.as_deref(), Some("css"));
+        assert_eq!(p.text, "grid");
+        let p = interpret(&lib, "Alpha:grid", None);
+        assert_eq!(p.docset.as_deref(), Some("a"));
+        let p = interpret(&lib, "std::vector", None);
+        assert_eq!(p.docset, None);
+        assert_eq!(p.text, "std::vector");
+        let p = interpret(&lib, "prop:grid", None);
+        assert_eq!(p.kind.as_deref(), Some("prop"));
+        assert_eq!(p.text, "grid");
+        let p = interpret(&lib, "css:grid", Some("a"));
+        assert_eq!(p.docset.as_deref(), Some("a"));
+        assert_eq!(p.text, "css:grid");
     }
 
     #[test]

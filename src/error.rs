@@ -20,7 +20,7 @@ pub enum CliError {
     /// El docset pedido con `--docset` no existe.
     #[error("docset not found: {0}")]
     UnknownDocset(String),
-    /// La búsqueda no devolvió ninguna coincidencia (solo en `open`).
+    /// La búsqueda no devolvió ninguna coincidencia (en `open` o `show`).
     #[error("no match for: {0}")]
     NoMatch(String),
     /// El docset no tiene `Documents/` (tarix pendiente de extraer).
@@ -39,9 +39,24 @@ pub enum CliError {
         /// Motivo (del núcleo).
         reason: String,
     },
+    /// Fallo de lectura de archivo en disco.
+    #[error("cannot read file {}: {source}", path.display())]
+    ReadFailed {
+        /// Ruta del archivo.
+        path: PathBuf,
+        /// Error de E/S.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Fallo de acceso al portapapeles.
+    #[error("clipboard error: {0}")]
+    Clipboard(String),
     /// Fallo de carga del escaneo o de los índices.
     #[error("cannot load docsets: {0}")]
     Load(String),
+    /// Fallo en la interfaz TUI.
+    #[error("TUI error: {0}")]
+    Tui(String),
     /// No se pudo abrir el fichero con la aplicación por defecto.
     #[error("cannot open {}: {source}", path.display())]
     OpenFailed {

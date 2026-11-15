@@ -60,6 +60,48 @@ pub fn truncate_middle(text: &str, width: usize) -> String {
     format!("{head}…{tail}")
 }
 
+/// Recorta por el final con elipsis, contando ancho de columnas.
+pub fn truncate_end(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in text.chars() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw + 1 > width {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Recorta por el principio con elipsis (conserva el final: útil en rutas
+/// como `std::collections::VecDeque::push_back`).
+pub fn truncate_start(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut w = 1;
+    for c in text.chars().rev() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out.reverse();
+    out.into_iter().collect()
+}
+
 /// Ancho visible en caracteres de una pantalla dada.
 pub fn visible_width(text: &str) -> usize {
     text.chars().count()

@@ -18,12 +18,12 @@ pub fn cli_styles() -> Styles {
         .error(ui::ERROR.bold())
 }
 
-/// Búsqueda y apertura de docsets fuera de línea.
+/// Búsqueda, visualización y gestión de docsets fuera de línea.
 #[derive(Debug, Parser)]
 #[command(
     name = "opendoc-cli",
     version,
-    about = "Search and open offline docsets from the terminal",
+    about = "Search, view, and browse offline docsets from the terminal",
     long_about = None,
     disable_help_subcommand = true,
     styles = cli_styles()
@@ -35,9 +35,12 @@ pub struct Cli {
     /// Base de la caché tarix (por defecto: datos de OpenDoc).
     #[arg(long, global = true, value_name = "DIR")]
     pub tarix_cache: Option<PathBuf>,
-    /// Subcomando a ejecutar.
+    /// No priorizar el docset del proyecto actual (Cargo.toml, package.json…).
+    #[arg(long, global = true)]
+    pub no_context: bool,
+    /// Subcomando a ejecutar. Si se omite en terminal interactiva, inicia la TUI.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Subcomandos disponibles.
@@ -45,7 +48,7 @@ pub struct Cli {
 pub enum Command {
     /// Busca entradas por nombre en todos los docsets cargados.
     Search {
-        /// Texto a buscar (una o varias palabras).
+        /// Texto a buscar (una o varias palabras, o prefijo `docset:query`).
         #[arg(required = true, num_args = 1.., value_name = "QUERY")]
         query: Vec<String>,
         /// Restringe la búsqueda a un docset (id o nombre).
@@ -58,9 +61,34 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Abre la mejor coincidencia en el visor del sistema.
+    /// Muestra la documentación directamente en la terminal sin abrir el navegador.
+    #[command(alias = "cat")]
+    Show {
+        /// Texto a buscar o símbolo (ej. "Vec::push" o "rust:Vec::push").
+        #[arg(required = true, num_args = 1.., value_name = "QUERY")]
+        query: Vec<String>,
+        /// Restringe la búsqueda a un docset (id o nombre).
+        #[arg(long, value_name = "DOCSET")]
+        docset: Option<String>,
+        /// Muestra únicamente los bloques de código o ejemplos de la documentación.
+        #[arg(long)]
+        code: bool,
+        /// Muestra el texto plano/crudo sin colores ni cabeceras decorativas.
+        #[arg(long)]
+        raw: bool,
+        /// Copia la documentación renderizada directamente al portapapeles del sistema.
+        #[arg(long)]
+        copy: bool,
+        /// Salida estructurada JSON (firma, cuerpo, ejemplos de código).
+        #[arg(long)]
+        json: bool,
+        /// Ancho de maquetación (por defecto, el del terminal; máx. 110).
+        #[arg(long, value_name = "COLS")]
+        width: Option<usize>,
+    },
+    /// Abre la mejor coincidencia en el navegador o visor del sistema.
     Open {
-        /// Texto a buscar (una o varias palabras).
+        /// Texto a buscar (una o varias palabras, o prefijo `docset:query`).
         #[arg(required = true, num_args = 1.., value_name = "QUERY")]
         query: Vec<String>,
         /// Restringe la búsqueda a un docset (id o nombre).
@@ -76,10 +104,25 @@ pub enum Command {
         #[arg(long)]
         path: bool,
     },
+    /// Interfaz interactiva de pantalla completa (TUI) con búsqueda en vivo y vista previa.
+    Tui {
+        /// Restringe la TUI a un docset inicial.
+        #[arg(long, value_name = "DOCSET")]
+        docset: Option<String>,
+        /// Filtro inicial de búsqueda.
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
+    },
     /// Lista los docsets instalados y los tarix pendientes.
     List {
         /// Salida JSON (una máquina la consume).
         #[arg(long)]
         json: bool,
+    },
+    /// Genera el autocompletado para tu shell (bash, zsh, fish, powershell, elvish).
+    Completions {
+        /// Shell de destino.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }

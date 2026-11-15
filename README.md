@@ -64,21 +64,105 @@ descomprímelo. Los paquetes incluyen tanto `opendoc-cli` como `odc`, optimizado
 ## Primeros pasos
 
 ```bash
-# 1. ¿Qué docsets hay instalados?
-odc list
+# 1. Lanza la interfaz interactiva de pantalla completa (TUI)
+odc
 
-# 2. Busca con badges compactos de tipo
+# 2. Lee documentación directamente en la terminal sin abrir el navegador
+odc show "Vec::push"
+odc cat "bash:echo"
+
+# 3. Muestra solo ejemplos de código o copia al portapapeles
+odc show "Vec::push" --code
+odc show "std::vector" --copy
+
+# 4. Busca con badges compactos de tipo
 odc search grid --limit 5
 
-# 3. Sintaxis directa docset:query
+# 5. Sintaxis directa docset:query
 odc search css:grid
 odc open java:string
-
-# 4. Abre la mejor coincidencia o elige con el selector interactivo
-odc open std::vector
 ```
 
 ## Comandos
+
+### `tui` (o simplemente `odc` sin argumentos)
+
+Lector de documentación de pantalla completa (Ratatui, paleta Catppuccin Mocha):
+
+- **Búsqueda difusa en vivo** con la letra coincidente resaltada y la sintaxis `rust:Vec::push`, `fn:map`, `py:fn:dumps` (chips de docset y tipo visibles en la barra).
+- **Lector real**, no un volcado de texto: encabezados, listas, tablas, citas, código resaltado con `syntect` y enlaces. Re-maqueta al redimensionar, con barra de scroll y porcentaje.
+- **Enlaces navegables**: `Tab` selecciona el siguiente enlace, `Enter` lo sigue dentro del propio docset y `⌫` vuelve atrás (historial).
+- **Buscar en la página** (`/`, luego `n`/`N`): resaltado de todas las coincidencias (mayúsculas inteligentes) y contador.
+- **Índice de la página** (`O`, `gO` o `Ctrl+O`): panel con los encabezados para saltar a «Examples» o «Panics».
+- **Relacionados** (`r`): otros símbolos de la misma página o del mismo tipo (los métodos de `Vec`), sin salir del lector.
+- **Favoritos y recientes** (`m` marca ★; `H`, `Ctrl+H` o `F2` los abren): se guardan en `cli-state.json` (directorio de datos de OpenDoc, o la ruta de `ODC_STATE`) y se abren sin buscar; `Supr` olvida una entrada.
+- **Selectores** de docset (`Ctrl+D`) y de tipo de símbolo (`Ctrl+T`) con filtro incremental.
+- **Ratón**: rueda para desplazar, clic para elegir resultado y **selección de texto propia** en el lector: arrastra para seleccionar (se copia al soltar), doble clic = palabra, triple clic = línea. Arrastrar fuera del panel hace autoscroll.
+- **Contexto de proyecto**: dentro de un directorio con `Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`… la TUI arranca filtrada por el docset del lenguaje (`Esc` limpia el filtro; `--no-context` lo desactiva).
+- Adaptable: en terminales estrechas (< 90 columnas) muestra una sola columna.
+- La vista previa se carga solo cuando el teclado queda en reposo, así que mantener pulsada una tecla nunca se atasca.
+
+| Búsqueda | |
+| --- | --- |
+| `↑↓` `Ctrl+N/P` | mover selección |
+| `Enter` `Tab` `→` | leer el símbolo |
+| `Ctrl+D` / `Ctrl+T` | elegir docset / tipo |
+| `Shift+Tab` | ciclar docset |
+| `Ctrl+W` `Ctrl+U` | borrar palabra / línea |
+| `Ctrl+Y` / `Ctrl+B` | copiar ejemplo / abrir en el navegador |
+| `Ctrl+H` `F2` `Alt+H` | favoritos y recientes |
+| `Ctrl+F` / `Ctrl+O` / `Ctrl+R` | marcar ★ / índice / relacionados |
+
+| Lector | |
+| --- | --- |
+| `j` `k` `Space` `b` `Ctrl+D/U` `gg` `G` | desplazamiento |
+| `/` `n` `N` | buscar en la página / siguiente / anterior |
+| `O` `gO` | índice de secciones |
+| `r` | símbolos relacionados |
+| `m` `H` | marcar favorito / favoritos y recientes |
+| `[` `]` | sección anterior / siguiente |
+| `Tab` `Shift+Tab` `Enter` `⌫` | enlaces e historial |
+| `y` `Y` `s` | copiar ejemplo / todo / firma |
+| `o` | abrir la página en el navegador |
+| `d` `t` | elegir docset / tipo |
+| `/` `i` | volver a la búsqueda |
+| `?` `F1` | ayuda · `q` / `Ctrl+C` salir |
+
+El portapapeles usa `wl-copy`, `xclip` o `xsel` (y OSC 52 como último recurso, válido por SSH); en macOS y Windows, el del sistema.
+
+### `show` (alias `cat`)
+
+Renderiza la documentación directamente en la terminal con el mismo motor que la TUI:
+
+- Extrae la sección exacta del símbolo (`#method.push`…) **incluida su descripción**, aunque el HTML la coloque fuera del ancla.
+- Cabecera con tipo, docset y versión (`Stable since…`), firma resaltada, listas, tablas y código con TrueColor.
+- Paginador automático (`less -R`) si no cabe en pantalla; se degrada a texto plano al redirigir.
+
+```console
+$ odc show "rust:Vec::push"
+ fn  std::vec::Vec::push
+rust  ·  Stable since Rust version 1.0.0, const unstable
+
+ pub fn push(&mut self, value: T)
+────────────────────────────────────────────────────────────
+
+Appends an element to the back of a collection.
+…
+```
+
+Flags de `show`: `--code` (solo firma y ejemplos), `--copy`, `--raw` (texto plano), `--json` (contrato `version: 1`) y `--width <COLS>`.
+
+### Sintaxis de consulta
+
+`docset:texto`, `tipo:texto` o ambos (`rust:fn:push`). Los docsets admiten id, nombre y alias (`py`, `js`, `ts`, `rs`, `sh`). `std::vector` no se confunde con un prefijo. Los docsets de DevDocs guardan una *categoría* en el campo `kind`; el CLI infiere el tipo real (`fn`, `struct`, `trait`, `macro`…) desde la ruta.
+
+Las búsquedas de `search`, `show` y `open` priorizan automáticamente el docset del proyecto actual (sin descartar el resto). Desactívalo con `--no-context`.
+
+### `completions`
+
+```bash
+odc completions zsh > ~/.zfunc/_odc      # bash, zsh, fish, powershell, elvish
+```
 
 ### `list`
 
@@ -190,7 +274,8 @@ o después del subcomando.
 | `--tarix-cache <DIR>` | todos | Base de la caché tarix. Por defecto, los datos de OpenDoc. |
 | `--docset <DOCSET>` | `search`, `open` | Restringe la búsqueda a un docset (id, nombre o familia). |
 | `--limit <N>` | `search` | Número máximo de resultados. Por defecto `20`, tope `500`. |
-| `--json` | `search`, `list` | Emite JSON en lugar de la tabla con color. |
+| `--no-context` | todos | No priorizar el docset del proyecto actual. |
+| `--json` | `search`, `list`, `show` | Emite JSON en lugar de la tabla con color. |
 | `--non-interactive` | `open` | Desactiva el selector interactivo si hay múltiples resultados y abre el primero. |
 | `--exact` | `open` | Abre la mejor coincidencia sin interactividad. |
 | `-h`, `--help` | todos | Ayuda del comando con paleta de colores coherente. |
