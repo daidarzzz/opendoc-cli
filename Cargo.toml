@@ -1,15 +1,15 @@
 [package]
 name = "opendoc-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Offline docset search, viewing and browsing from the terminal for OpenDoc"
+description = "Search, read, and manage OpenDoc docsets from the terminal"
 repository = "https://github.com/daidarzzz/opendoc-cli"
 readme = "README.md"
 default-run = "odc"
 
 [dependencies]
-# Núcleo compartido con la app: mismo escaneo, índices, tarix y búsqueda.
+# Shared scanner, indexes, tarix support, and search.
 opendoc-core = { git = "https://github.com/daidarzzz/opendoc-core", tag = "v0.2.0" }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
@@ -28,14 +28,24 @@ arboard = "3"
 unicode-width = "0.2"
 ego-tree = "0.10"
 clap_complete = "4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-webpki-roots"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+tempfile = "3"
+semver = "1"
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+base64 = "0.22"
 
 [dev-dependencies]
-tempfile = "3"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
-# Binario pequeño para distribuir en las releases: prioriza el tamaño.
+# Optimize release binaries for size.
 [profile.release]
-opt-level = "z"     # optimiza por tamaño
-lto = true          # enlazado con optimización global
-codegen-units = 1   # más optimización (compilación algo más lenta)
-panic = "abort"     # sin tablas de desenrollado
-strip = true        # sin símbolos ni metadatos de depuración
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

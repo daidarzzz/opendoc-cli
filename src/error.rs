@@ -5,6 +5,9 @@ use std::path::PathBuf;
 /// Fallo en tiempo de ejecución (no de uso: clap cubre el 2).
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
+    #[error("{0}")]
+    Management(String),
+
     /// No se pudo resolver el directorio de datos de la app.
     #[error("cannot locate the OpenDoc data directory; pass --docsets explicitly")]
     NoDataDir,

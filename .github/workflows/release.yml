@@ -1,15 +1,12 @@
 name: Release
 
-# Al crear un tag `v*` (p. ej. `v0.1.1`) se compilan los binarios de las tres
-# plataformas y se adjuntan a la release del tag.
 on:
   push:
     tags:
       - "v*"
 
-# Necesario para que `softprops/action-gh-release` pueda crear la release.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,7 +17,6 @@ jobs:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      # Un objetivo que falle no cancela los demás: interesa publicar el resto.
       fail-fast: false
       matrix:
         include:
@@ -30,54 +26,89 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
-          # macOS: cubre Apple Silicon y también Intel.
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Instalar Rust
+      - name: Verify release version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml)"
+          test "v$version" = "$GITHUB_REF_NAME"
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Caché de Cargo
+      - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Compilar
+      - name: Test
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Empaquetar (tar.gz)
+      - name: Package and checksum (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
-          name="${BINARY}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="${BINARY}-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
           mkdir -p stage dist
           cp "target/${{ matrix.target }}/release/${BINARY}" "target/${{ matrix.target }}/release/odc" stage/
-          cp README.md LICENSE stage/
-          tar -czf "dist/${name}.tar.gz" -C stage .
+          cp README.md README.es.md LICENSE stage/
+          printf 'OpenDoc CLI release package\n' > stage/opendoc-cli.release
+          tar -czf "dist/$name" -C stage .
+          cd dist
+          shasum -a 256 "$name" > "$name.sha256"
 
-      - name: Empaquetar (zip)
+      - name: Package and checksum (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $name = "$env:BINARY-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          $name = "$env:BINARY-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Force -Path stage, dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$env:BINARY.exe", "target/${{ matrix.target }}/release/odc.exe" stage/
-          Copy-Item README.md, LICENSE stage/
-          Compress-Archive -Path "stage/*" -DestinationPath "dist/$name.zip"
+          Copy-Item README.md, README.es.md, LICENSE stage/
+          'OpenDoc CLI release package' | Set-Content -Encoding ascii stage/opendoc-cli.release
+          Compress-Archive -Path "stage/*" -DestinationPath "dist/$name"
+          $digest = (Get-FileHash -Algorithm SHA256 "dist/$name").Hash.ToLowerInvariant()
+          "$digest  $name" | Set-Content -Encoding ascii "dist/$name.sha256"
 
-      - name: Publicar en la release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          draft: true
+      - name: Publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

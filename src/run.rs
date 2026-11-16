@@ -11,9 +11,10 @@ use opendoc_core::library::{self, Library, LoadOptions};
 use opendoc_core::resolve::resolve_request;
 use opendoc_core::search::{search, SearchIndex, SearchResult};
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, DocsetCommand};
 use crate::clip;
 use crate::context;
+use crate::docsets::{self, Action, Manager};
 use crate::error::CliError;
 use crate::pager;
 use crate::paths::{self, Locations};
@@ -35,6 +36,9 @@ const DOCSET_WIDTH: usize = 12;
 
 /// Ejecuta el subcomando pedido.
 pub fn run(cli: &Cli) -> Result<(), CliError> {
+    if let Some(Command::Update { check }) = &cli.command {
+        return crate::update::run(*check);
+    }
     let locations = paths::resolve(cli.docsets.as_deref(), cli.tarix_cache.as_deref())?;
     match &cli.command {
         Some(Command::Search {
@@ -98,6 +102,8 @@ pub fn run(cli: &Cli) -> Result<(), CliError> {
             clap_complete::generate(*shell, &mut cmd, "odc", &mut std::io::stdout());
             Ok(())
         }
+        Some(Command::Docsets { command }) => docsets_command(&locations, command),
+        Some(Command::Update { .. }) => unreachable!("update is dispatched before path resolution"),
         Some(Command::List { json }) => list_command(&locations, *json),
         None => {
             if std::io::stdout().is_terminal() {
@@ -114,6 +120,100 @@ pub fn run(cli: &Cli) -> Result<(), CliError> {
     }
 }
 
+fn docsets_command(locations: &Locations, command: &DocsetCommand) -> Result<(), CliError> {
+    use crate::cli::FeedCommand;
+
+    let manager = Manager::new(locations)?;
+    let last_progress = std::sync::Mutex::new(None);
+    let progress = |report: docsets::ProgressReport| {
+        if !std::io::stderr().is_terminal() {
+            return;
+        }
+        if let Ok(mut last) = last_progress.lock() {
+            let now = std::time::Instant::now();
+            if last.is_none_or(|(when, stage)| {
+                stage != report.stage || now.duration_since(when).as_millis() >= 250
+            }) {
+                eprintln!("{report}");
+                *last = Some((now, report.stage));
+            }
+        }
+    };
+    match command {
+        DocsetCommand::Catalog { query } => {
+            let (mut rows, ready) = manager.rows()?;
+            if !ready {
+                match manager.refresh() {
+                    Ok(message) => {
+                        eprintln!("{message}");
+                        (rows, _) = manager.rows()?;
+                    }
+                    Err(e) if !rows.is_empty() => eprintln!("Catalog unavailable: {e}"),
+                    Err(e) => return Err(e),
+                }
+            }
+            let rows: Vec<_> = rows
+                .iter()
+                .filter(|r| r.matches(query.as_deref().unwrap_or("")))
+                .collect();
+            if rows.is_empty() {
+                println!("No matching docsets.");
+            }
+            for row in rows {
+                println!("{}", row.description());
+            }
+        }
+        DocsetCommand::Refresh => println!("{}", manager.refresh()?),
+        DocsetCommand::Feeds { command } => {
+            match command {
+                Some(FeedCommand::Set { repos }) => manager.set_feeds(&repos.join(" "))?,
+                Some(FeedCommand::Reset) => manager.reset_feeds()?,
+                None => {}
+            }
+            println!("DevDocs");
+            for repo in manager.feeds()? {
+                println!("{}", repo.path());
+            }
+        }
+        DocsetCommand::Install { id } => {
+            if !manager.has_catalog()? {
+                eprintln!("{}", manager.refresh()?);
+            }
+            println!("{}", manager.change(Action::Install, id, &progress)?);
+        }
+        DocsetCommand::Update { id, force } => {
+            if !manager.has_catalog()? {
+                eprintln!("{}", manager.refresh()?);
+            }
+            let action = if *force {
+                Action::Reinstall
+            } else {
+                Action::Update
+            };
+            println!("{}", manager.change(action, id, &progress)?);
+        }
+        DocsetCommand::Uninstall { id, yes } => {
+            if !yes {
+                if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+                    return Err(docsets::error("pass --yes to uninstall without a terminal"));
+                }
+                eprint!("Uninstall {id}? [y/N] ");
+                std::io::stderr().flush().map_err(docsets::error)?;
+                let mut answer = String::new();
+                std::io::stdin()
+                    .read_line(&mut answer)
+                    .map_err(docsets::error)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("Uninstall cancelled.");
+                    return Ok(());
+                }
+            }
+            println!("{}", manager.change(Action::Uninstall, id, &progress)?);
+        }
+    }
+    Ok(())
+}
+
 /// Une las palabras del texto de búsqueda.
 fn join_query(words: &[String]) -> String {
     words.join(" ")
@@ -121,7 +221,7 @@ fn join_query(words: &[String]) -> String {
 
 /// Carga el inventario compartido. La carga nunca extrae tarix: reutiliza
 /// las cachés que la app ya haya creado.
-fn load(locations: &Locations) -> Result<Library, CliError> {
+pub(crate) fn load(locations: &Locations) -> Result<Library, CliError> {
     if !locations.docsets.is_dir() {
         return Err(CliError::DocsetsMissing {
             path: locations.docsets.clone(),
@@ -543,7 +643,16 @@ fn tui_command(
     initial_query: Option<&str>,
     no_context: bool,
 ) -> Result<(), CliError> {
-    let library = load(locations)?;
+    let library = match load(locations) {
+        Err(CliError::DocsetsMissing { .. }) if !locations.docsets.exists() => Library {
+            source_dir: locations.docsets.clone(),
+            docsets: Vec::new(),
+            pending: Vec::new(),
+            issues: Vec::new(),
+            entries: Vec::new(),
+        },
+        result => result?,
+    };
     let initial_id = match explicit_docset {
         Some(token) => Some(filter_id(&library, token)?),
         // Sin docset explícito: si el proyecto actual tiene un único docset
@@ -557,7 +666,12 @@ fn tui_command(
             }
         }
     };
-    tui::run_tui(&library, initial_id, initial_query.map(str::to_string))
+    tui::run_tui(
+        library,
+        initial_id,
+        initial_query.map(str::to_string),
+        Manager::new(locations)?,
+    )
 }
 
 /// Imprime el resultado de búsqueda alineado con badges compactos.

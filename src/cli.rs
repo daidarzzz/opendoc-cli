@@ -1,4 +1,4 @@
-//! Definición de la interfaz de línea de comandos (clap).
+//! Command-line interface definitions.
 
 use std::path::PathBuf;
 
@@ -6,7 +6,7 @@ use clap::{builder::styling::Styles, Parser, Subcommand};
 
 use crate::ui;
 
-/// Paleta Catppuccin Mocha para la ayuda (--help).
+/// Catppuccin Mocha styles for command help.
 pub fn cli_styles() -> Styles {
     Styles::styled()
         .header(ui::ACCENT.bold())
@@ -18,111 +18,162 @@ pub fn cli_styles() -> Styles {
         .error(ui::ERROR.bold())
 }
 
-/// Búsqueda, visualización y gestión de docsets fuera de línea.
+/// Search, read, and manage offline docsets.
 #[derive(Debug, Parser)]
 #[command(
     name = "opendoc-cli",
     version,
-    about = "Search, view, and browse offline docsets from the terminal",
+    about = "Search, read, and manage offline docsets from the terminal",
     long_about = None,
     disable_help_subcommand = true,
     styles = cli_styles()
 )]
 pub struct Cli {
-    /// Carpeta que contiene los `*.docset` (por defecto: ajustes de OpenDoc).
+    /// Directory containing `*.docset` bundles (defaults to OpenDoc settings).
     #[arg(long, global = true, value_name = "DIR")]
     pub docsets: Option<PathBuf>,
-    /// Base de la caché tarix (por defecto: datos de OpenDoc).
+    /// Root of the tarix cache (defaults to the OpenDoc data directory).
     #[arg(long, global = true, value_name = "DIR")]
     pub tarix_cache: Option<PathBuf>,
-    /// No priorizar el docset del proyecto actual (Cargo.toml, package.json…).
+    /// Disable project-based docset prioritization.
     #[arg(long, global = true)]
     pub no_context: bool,
-    /// Subcomando a ejecutar. Si se omite en terminal interactiva, inicia la TUI.
+    /// Command to run. An interactive terminal starts the TUI by default.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-/// Subcomandos disponibles.
+/// Available commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Busca entradas por nombre en todos los docsets cargados.
+    /// Search entries by name across loaded docsets.
     Search {
-        /// Texto a buscar (una o varias palabras, o prefijo `docset:query`).
+        /// Search text, optionally prefixed with `docset:`.
         #[arg(required = true, num_args = 1.., value_name = "QUERY")]
         query: Vec<String>,
-        /// Restringe la búsqueda a un docset (id o nombre).
+        /// Limit the search to one docset (ID or name).
         #[arg(long, value_name = "DOCSET")]
         docset: Option<String>,
-        /// Número máximo de resultados (por defecto 20, tope 500).
+        /// Maximum number of results (default 20, maximum 500).
         #[arg(long, value_name = "N", default_value_t = 20)]
         limit: usize,
-        /// Salida JSON (una máquina la consume).
+        /// Print machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Muestra la documentación directamente en la terminal sin abrir el navegador.
+    /// Read documentation in the terminal.
     #[command(alias = "cat")]
     Show {
-        /// Texto a buscar o símbolo (ej. "Vec::push" o "rust:Vec::push").
+        /// Search text or symbol, such as "Vec::push" or "rust:Vec::push".
         #[arg(required = true, num_args = 1.., value_name = "QUERY")]
         query: Vec<String>,
-        /// Restringe la búsqueda a un docset (id o nombre).
+        /// Limit the search to one docset (ID or name).
         #[arg(long, value_name = "DOCSET")]
         docset: Option<String>,
-        /// Muestra únicamente los bloques de código o ejemplos de la documentación.
+        /// Show only the signature and code examples.
         #[arg(long)]
         code: bool,
-        /// Muestra el texto plano/crudo sin colores ni cabeceras decorativas.
+        /// Print plain text without colors or decorative headings.
         #[arg(long)]
         raw: bool,
-        /// Copia la documentación renderizada directamente al portapapeles del sistema.
+        /// Copy rendered documentation to the clipboard.
         #[arg(long)]
         copy: bool,
-        /// Salida estructurada JSON (firma, cuerpo, ejemplos de código).
+        /// Print the signature, body, and code examples as JSON.
         #[arg(long)]
         json: bool,
-        /// Ancho de maquetación (por defecto, el del terminal; máx. 110).
+        /// Output width (defaults to the terminal width, capped at 110).
         #[arg(long, value_name = "COLS")]
         width: Option<usize>,
     },
-    /// Abre la mejor coincidencia en el navegador o visor del sistema.
+    /// Open a result in the default viewer or browser.
     Open {
-        /// Texto a buscar (una o varias palabras, o prefijo `docset:query`).
+        /// Search text, optionally prefixed with `docset:`.
         #[arg(required = true, num_args = 1.., value_name = "QUERY")]
         query: Vec<String>,
-        /// Restringe la búsqueda a un docset (id o nombre).
+        /// Limit the search to one docset (ID or name).
         #[arg(long, value_name = "DOCSET")]
         docset: Option<String>,
-        /// Desactiva el selector interactivo si hay múltiples coincidencias.
+        /// Skip the interactive picker.
         #[arg(long)]
         non_interactive: bool,
-        /// Abre la mejor coincidencia directamente sin interactividad.
+        /// Open the top result without prompting.
         #[arg(long)]
         exact: bool,
-        /// Imprime solo la ruta del fichero resuelto en disco sin abrir el visor del sistema.
+        /// Print the resolved file path without opening it.
         #[arg(long)]
         path: bool,
     },
-    /// Interfaz interactiva de pantalla completa (TUI) con búsqueda en vivo y vista previa.
+    /// Launch the interactive terminal UI with live search and preview.
     Tui {
-        /// Restringe la TUI a un docset inicial.
+        /// Select the initial docset in the TUI.
         #[arg(long, value_name = "DOCSET")]
         docset: Option<String>,
-        /// Filtro inicial de búsqueda.
+        /// Initial search query.
         #[arg(value_name = "QUERY")]
         query: Option<String>,
     },
-    /// Lista los docsets instalados y los tarix pendientes.
+    /// List installed docsets and pending tarix archives.
     List {
-        /// Salida JSON (una máquina la consume).
+        /// Print machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Genera el autocompletado para tu shell (bash, zsh, fish, powershell, elvish).
+    /// Browse, install, update, and uninstall docsets.
+    Docsets {
+        #[command(subcommand)]
+        command: DocsetCommand,
+    },
+    /// Update OpenDoc CLI from GitHub Releases.
+    Update {
+        /// Report the installed and latest versions without installing.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Generate shell completions for Bash, Zsh, Fish, PowerShell, or Elvish.
     Completions {
-        /// Shell de destino.
+        /// Target shell.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DocsetCommand {
+    /// Browse the catalog and show installed docsets.
+    Catalog {
+        /// Filter by name or catalog ID.
+        query: Option<String>,
+    },
+    /// Fetch a fresh copy of the catalog.
+    Refresh,
+    /// Show or configure additional GitHub feed repositories.
+    Feeds {
+        #[command(subcommand)]
+        command: Option<FeedCommand>,
+    },
+    /// Install a docset by its catalog ID.
+    Install { id: String },
+    /// Update an installed docset by its catalog ID.
+    Update {
+        id: String,
+        /// Reinstall from the catalog even when versions cannot be compared.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Uninstall a docset by catalog or installed ID.
+    Uninstall {
+        id: String,
+        /// Skip the confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FeedCommand {
+    /// Set additional GitHub repositories. Omit them to use only DevDocs.
+    Set { repos: Vec<String> },
+    /// Inherit OpenDoc's configured feeds again.
+    Reset,
 }

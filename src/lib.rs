@@ -3,9 +3,11 @@
 //! Reutiliza el mismo núcleo que la app (`opendoc-core`): escaneo,
 //! índices SQLite, cachés tarix y búsqueda difusa.
 
+mod catalog;
 pub mod cli;
 pub mod clip;
 pub mod context;
+mod docsets;
 pub mod error;
 pub mod pager;
 pub mod paths;
@@ -14,7 +16,9 @@ pub mod render;
 pub mod run;
 pub mod state;
 pub mod tui;
+mod tui_catalog;
 pub mod ui;
+mod update;
 
 use crate::cli::Cli;
 use clap::Parser;

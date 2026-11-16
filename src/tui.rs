@@ -1,4 +1,4 @@
-//! TUI de pantalla completa: búsqueda difusa en vivo, lector de
+//! TUI de pantalla completa: live fuzzy search, lector de
 //! documentación con scroll, enlaces navegables e historial.
 //!
 //! Dos zonas de foco: la **búsqueda** (escribes, ↑/↓ mueven la lista) y
@@ -35,10 +35,12 @@ use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::clip;
+use crate::docsets::Manager;
 use crate::error::CliError;
 use crate::query;
 use crate::render::{self, Doc, Layout as DocLayout, Seg};
 use crate::state::{Item, State};
+use crate::tui_catalog::CatalogView;
 use crate::ui;
 
 const READ_WIDTH: usize = 100;
@@ -123,8 +125,10 @@ struct View {
     link: Option<usize>,
 }
 
-struct App<'a> {
-    library: &'a Library,
+struct App {
+    library: Library,
+    manager: Manager,
+    catalog: Option<CatalogView>,
     index: SearchIndex,
     kinds: std::collections::HashSet<String>,
     query: String,
@@ -247,18 +251,21 @@ impl Selection {
     }
 }
 
-impl<'a> App<'a> {
+impl App {
     fn new(
-        library: &'a Library,
+        library: Library,
+        manager: Manager,
         docset: Option<String>,
         kind: Option<String>,
         query: Option<String>,
     ) -> Self {
         let q = query.unwrap_or_default();
         let mut app = Self {
-            library,
             index: SearchIndex::build_for_search(library.entries.clone()),
-            kinds: query::known_kinds(library),
+            kinds: query::known_kinds(&library),
+            library,
+            manager,
+            catalog: None,
             cursor: q.chars().count(),
             query: q,
             docset,
@@ -289,6 +296,28 @@ impl<'a> App<'a> {
         app
     }
 
+    fn reload_library(&mut self, library: Library) {
+        self.index = SearchIndex::build_for_search(library.entries.clone());
+        self.kinds = query::known_kinds(&library);
+        self.library = library;
+        self.cache.clear();
+        self.layout_cache = None;
+        self.entry_index = None;
+        self.view = None;
+        self.history.clear();
+        self.find = None;
+        self.sel = None;
+        self.focus = Focus::Search;
+        if self
+            .docset
+            .as_deref()
+            .is_some_and(|id| self.library.docset(id).is_none())
+        {
+            self.docset = None;
+        }
+        self.refresh();
+    }
+
     fn say(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Instant::now(), false));
     }
@@ -299,7 +328,7 @@ impl<'a> App<'a> {
     // ───────── búsqueda ─────────
 
     fn refresh(&mut self) {
-        let parsed = query::parse(self.library, &self.kinds, &self.query, None);
+        let parsed = query::parse(&self.library, &self.kinds, &self.query, None);
         let docset = parsed.docset.or_else(|| self.docset.clone());
         let kind = parsed.kind.or_else(|| self.kind.clone());
         let ids = docset.map(|d| vec![d]);
@@ -409,7 +438,7 @@ impl<'a> App<'a> {
             None => {
                 self.view = None;
                 self.warn(format!(
-                    "No se pudo leer «{}» (¿tarix sin extraer?)",
+                    "Cannot read \"{}\". The tarix archive may need to be extracted.",
                     hit.name
                 ));
             }
@@ -485,7 +514,7 @@ impl<'a> App<'a> {
         // Solo enlaces que aparecen en el texto maquetado.
         let visible: Vec<usize> = (0..n).filter(|i| lay.link_lines[*i].is_some()).collect();
         if visible.is_empty() {
-            self.warn("No hay enlaces en este documento");
+            self.warn("There are no links in this document");
             return;
         }
         let cur_pos = v.link.and_then(|l| visible.iter().position(|x| *x == l));
@@ -532,13 +561,13 @@ impl<'a> App<'a> {
             return;
         };
         let Some(li) = view.link else {
-            self.warn("Selecciona un enlace con Tab");
+            self.warn("Press Tab to select a link");
             return;
         };
         let href = view.doc.links[li].clone();
         if href.contains("://") || href.starts_with("mailto:") {
             match crate::run::open_in_default(Path::new(&href)) {
-                Ok(()) => self.say(format!("Abierto en el navegador: {href}")),
+                Ok(()) => self.say(format!("Opened in the browser: {href}")),
                 Err(e) => self.warn(e.to_string()),
             }
             return;
@@ -590,7 +619,7 @@ impl<'a> App<'a> {
                 });
                 self.record_recent();
             }
-            None => self.warn(format!("No se pudo abrir el enlace: {href}")),
+            None => self.warn(format!("Cannot open the link: {href}")),
         }
     }
 
@@ -641,9 +670,9 @@ impl<'a> App<'a> {
         };
         let name = it.name.clone();
         if self.state.toggle_favorite(it) {
-            self.say(format!("★ Añadido a favoritos: {name}"));
+            self.say(format!("★ Added to favorites: {name}"));
         } else {
-            self.say(format!("Quitado de favoritos: {name}"));
+            self.say(format!("Removed from favorites: {name}"));
         }
     }
 
@@ -655,11 +684,11 @@ impl<'a> App<'a> {
     /// Abre un símbolo guardado o relacionado sin pasar por la búsqueda.
     fn open_item(&mut self, it: Item) {
         if self.library.docset(&it.docset).is_none() {
-            self.warn(format!("El docset «{}» ya no está instalado", it.docset));
+            self.warn(format!("Docset \"{}\" is no longer installed", it.docset));
             return;
         }
         let Some(doc) = self.load_doc(&it.docset, &it.path, &it.name, &it.kind) else {
-            self.warn(format!("No se pudo abrir «{}»", it.name));
+            self.warn(format!("Cannot open \"{}\"", it.name));
             return;
         };
         if let Some(prev) = self.view.take() {
@@ -708,12 +737,12 @@ impl<'a> App<'a> {
     fn open_recent(&mut self) {
         let items = self.recent_items();
         if items.is_empty() {
-            self.warn("Aún no hay recientes ni favoritos (m marca un símbolo)");
+            self.warn("No favorites or recent pages yet. Press m to bookmark a symbol.");
             return;
         }
         self.overlay = Overlay::Pick(Picker {
             kind: PickKind::Recent,
-            title: " Favoritos y recientes · Supr olvida ".into(),
+            title: " Favorites and recent pages · Del removes ".into(),
             items,
             filter: String::new(),
             sel: 0,
@@ -726,7 +755,7 @@ impl<'a> App<'a> {
             return;
         };
         if lay.headings.is_empty() {
-            self.warn("Esta página no tiene secciones");
+            self.warn("This page has no sections");
             return;
         }
         let scroll = self.view.as_ref().map_or(0, |v| v.scroll);
@@ -746,7 +775,7 @@ impl<'a> App<'a> {
             .collect();
         self.overlay = Overlay::Pick(Picker {
             kind: PickKind::Outline,
-            title: " Índice de la página ".into(),
+            title: " Page outline ".into(),
             items,
             filter: String::new(),
             sel,
@@ -791,13 +820,13 @@ impl<'a> App<'a> {
             }
         }
         if items.is_empty() {
-            self.warn("Sin símbolos relacionados");
+            self.warn("No related symbols");
             return;
         }
         self.overlay = Overlay::Pick(Picker {
             kind: PickKind::Related,
             title: format!(
-                " Relacionados con {} ({}) ",
+                " Related to {} ({}) ",
                 ui::truncate_start(&name, 30),
                 items.len()
             ),
@@ -886,7 +915,7 @@ impl<'a> App<'a> {
         let file = v.path.split('#').next().unwrap_or("");
         match resolve_request(&documents, file) {
             Ok(r) => match crate::run::open_in_default(&r.path) {
-                Ok(()) => self.say(format!("Abierto en el navegador: {}", v.name)),
+                Ok(()) => self.say(format!("Opened in the browser: {}", v.name)),
                 Err(e) => self.warn(e.to_string()),
             },
             Err(e) => self.warn(e.to_string()),
@@ -897,22 +926,22 @@ impl<'a> App<'a> {
         let Some(v) = self.view.as_ref() else { return };
         let (label, text) = match what {
             'y' => match v.doc.code_blocks.first().or(v.doc.signature.as_ref()) {
-                Some(t) => ("ejemplo", t.clone()),
-                None => ("texto", v.doc.plain_text(100)),
+                Some(t) => ("example", t.clone()),
+                None => ("text", v.doc.plain_text(100)),
             },
             's' => match &v.doc.signature {
-                Some(t) => ("firma", t.clone()),
+                Some(t) => ("signature", t.clone()),
                 None => {
-                    self.warn("Este símbolo no tiene firma");
+                    self.warn("This symbol has no signature");
                     return;
                 }
             },
-            _ => ("documentación", v.doc.plain_text(100)),
+            _ => ("documentation", v.doc.plain_text(100)),
         };
         let name = v.name.clone();
         match clip::copy(&text) {
-            Ok(_) => self.say(format!("Copiado ({label}): {name}")),
-            Err(e) => self.warn(format!("No se pudo copiar: {e}")),
+            Ok(_) => self.say(format!("Copied {label}: {name}")),
+            Err(e) => self.warn(format!("Cannot copy: {e}")),
         }
     }
 
@@ -920,18 +949,18 @@ impl<'a> App<'a> {
         let mut items: Vec<(String, Option<String>)> = Vec::new();
         match kind {
             PickKind::Docset => {
-                items.push(("Todos los docsets".into(), None));
+                items.push(("All docsets".into(), None));
                 let mut counts: HashMap<&str, usize> = HashMap::new();
                 for e in &self.library.entries {
                     *counts.entry(e.docset_id.as_str()).or_default() += 1;
                 }
                 for d in &self.library.docsets {
                     let n = counts.get(d.id.as_str()).copied().unwrap_or(0);
-                    items.push((format!("{}  ·  {} entradas", d.name, n), Some(d.id.clone())));
+                    items.push((format!("{}  ·  {} entries", d.name, n), Some(d.id.clone())));
                 }
             }
             _ => {
-                items.push(("Todos los tipos".into(), None));
+                items.push(("All types".into(), None));
                 let mut counts: HashMap<String, usize> = HashMap::new();
                 for e in &self.library.entries {
                     if self.docset.as_ref().is_none_or(|d| d == &e.docset_id) {
@@ -953,8 +982,8 @@ impl<'a> App<'a> {
         };
         let sel = items.iter().position(|(_, v)| v == current).unwrap_or(0);
         let title = match kind {
-            PickKind::Docset => " Elegir docset ",
-            _ => " Elegir tipo de símbolo ",
+            PickKind::Docset => " Choose a docset ",
+            _ => " Choose a symbol type ",
         };
         self.overlay = Overlay::Pick(Picker {
             kind,
@@ -1083,10 +1112,11 @@ fn normalize(p: &Path) -> String {
 // ───────────────────────── Bucle principal ─────────────────────────
 
 /// Ejecuta la interfaz TUI.
-pub fn run_tui(
-    library: &Library,
+pub(crate) fn run_tui(
+    library: Library,
     initial_docset: Option<String>,
     initial_query: Option<String>,
+    manager: Manager,
 ) -> Result<(), CliError> {
     let tui_err = |e: std::io::Error| CliError::Tui(e.to_string());
     enable_raw_mode().map_err(tui_err)?;
@@ -1103,7 +1133,7 @@ pub fn run_tui(
 
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend).map_err(tui_err)?;
-    let mut app = App::new(library, initial_docset, None, initial_query);
+    let mut app = App::new(library, manager, initial_docset, None, initial_query);
 
     let res = event_loop(&mut terminal, &mut app);
 
@@ -1124,6 +1154,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     let tui_err = |e: std::io::Error| CliError::Tui(e.to_string());
     app.load_selected();
     loop {
+        if let Some(library) = app.catalog.as_mut().and_then(CatalogView::poll) {
+            app.reload_library(library);
+        }
         terminal
             .draw(|f| draw(f, app))
             .map_err(|e| CliError::Tui(e.to_string()))?;
@@ -1131,20 +1164,25 @@ fn event_loop<B: ratatui::backend::Backend>(
             return Ok(());
         }
         // Espera el primer evento y vacía la cola antes de cargar nada.
-        if !event::poll(Duration::from_millis(400)).map_err(tui_err)? {
+        let wait = if app.catalog.as_ref().is_some_and(CatalogView::busy) {
+            100
+        } else {
+            400
+        };
+        if !event::poll(Duration::from_millis(wait)).map_err(tui_err)? {
             continue;
         }
         loop {
             match event::read().map_err(tui_err)? {
                 Event::Key(k) if k.kind != KeyEventKind::Release => handle_key(app, k),
-                Event::Mouse(m) => handle_mouse(app, m),
+                Event::Mouse(m) if app.catalog.is_none() => handle_mouse(app, m),
                 _ => {}
             }
             if app.quit || !event::poll(Duration::ZERO).map_err(tui_err)? {
                 break;
             }
         }
-        if app.pending_load {
+        if app.pending_load && app.catalog.is_none() {
             app.load_selected();
         }
     }
@@ -1219,8 +1257,8 @@ fn finish_selection(app: &mut App) {
     }
     let n = text.chars().count();
     match clip::copy(&text) {
-        Ok(_) => app.say(format!("Copiado: {n} caracteres")),
-        Err(e) => app.warn(format!("No se pudo copiar: {e}")),
+        Ok(_) => app.say(format!("Copied {n} characters")),
+        Err(e) => app.warn(format!("Cannot copy: {e}")),
     }
 }
 
@@ -1349,6 +1387,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl && key.code == KeyCode::Char('c') {
         app.quit = true;
+        return;
+    }
+    if let Some(catalog) = &mut app.catalog {
+        if catalog.key(key) {
+            app.catalog = None;
+        }
+        return;
+    }
+    if key.code == KeyCode::F(4) {
+        app.overlay = Overlay::None;
+        app.catalog = Some(CatalogView::open(app.manager.clone()));
         return;
     }
     if !matches!(app.overlay, Overlay::None) {
@@ -1481,7 +1530,7 @@ fn handle_find_key(app: &mut App, key: KeyEvent) {
                 let q = f.input.clone();
                 app.find = None;
                 if !q.is_empty() {
-                    app.warn(format!("Sin coincidencias para «{q}»"));
+                    app.warn(format!("No matches for \"{q}\""));
                 }
             }
         }
@@ -1619,6 +1668,10 @@ fn key_hint(key: &str, label: &str) -> Vec<Span<'static>> {
 fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(C_BASE)), area);
+    if let Some(catalog) = &mut app.catalog {
+        catalog.draw(f);
+        return;
+    }
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1682,7 +1735,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .title_top(
             RLine::from(vec![Span::styled(
                 format!(
-                    " {} resultado{} ",
+                    " {} result{} ",
                     app.results.len(),
                     if app.results.len() == 1 { "" } else { "s" }
                 ),
@@ -1694,7 +1747,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let mut spans = vec![Span::styled(" ", Style::default())];
-    let parsed = query::parse(app.library, &app.kinds, &app.query, None);
+    let parsed = query::parse(&app.library, &app.kinds, &app.query, None);
     let docset_name = parsed
         .docset
         .as_ref()
@@ -1703,7 +1756,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .map(|d| d.name.clone());
     match &docset_name {
         Some(n) => spans.push(chip(n, C_MANTLE, C_GREEN)),
-        None => spans.push(chip("todos", C_TEXT, C_SURFACE)),
+        None => spans.push(chip("all", C_TEXT, C_SURFACE)),
     }
     if let Some(k) = parsed.kind.as_ref().or(app.kind.as_ref()) {
         spans.push(Span::raw(" "));
@@ -1713,7 +1766,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let prefix_w: usize = spans.iter().map(|s| s.content.width()).sum();
     if app.query.is_empty() {
         spans.push(Span::styled(
-            "escribe para buscar…  (rust:Vec::push · fn:map)",
+            "type to search…  (rust:Vec::push · fn:map)",
             Style::default().fg(C_MUTED),
         ));
     } else {
@@ -1763,7 +1816,7 @@ fn match_positions(name: &str, query: &str) -> Vec<usize> {
 
 fn draw_results(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.list_area = area;
-    let parsed = query::parse(app.library, &app.kinds, &app.query, None);
+    let parsed = query::parse(&app.library, &app.kinds, &app.query, None);
     let show_docset = app.docset.is_none() && parsed.docset.is_none();
     let inner_w = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = app
@@ -1809,12 +1862,12 @@ fn draw_results(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(if active { C_ACCENT } else { C_BORDER }))
-        .title(Span::styled(" Resultados ", Style::default().fg(C_MUTED)));
+        .title(Span::styled(" Results ", Style::default().fg(C_MUTED)));
     if app.results.is_empty() {
         let msg = if app.query.trim().is_empty() {
-            "No hay entradas."
+            "No entries. Press F4 to manage docsets."
         } else {
-            "Sin coincidencias."
+            "No matches."
         };
         f.render_widget(
             Paragraph::new(msg)
@@ -1875,11 +1928,11 @@ fn draw_reader(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let favorite = app.is_favorite();
 
     let (Some(lay), Some(view)) = (lay, app.view.as_ref()) else {
-        block = block.title(Span::styled(" Lector ", Style::default().fg(C_MUTED)));
+        block = block.title(Span::styled(" Reader ", Style::default().fg(C_MUTED)));
         let hint = if app.results.is_empty() {
-            "Nada que mostrar".to_string()
+            "Nothing to display".to_string()
         } else {
-            "Cargando…".to_string()
+            "Loading…".to_string()
         };
         f.render_widget(
             Paragraph::new(hint)
@@ -2045,7 +2098,7 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         let info = if fd.input.is_empty() {
             String::new()
         } else if fd.matches.is_empty() {
-            "  sin coincidencias".to_string()
+            "  no matches".to_string()
         } else {
             format!("  {}/{}", fd.cur + 1, fd.matches.len())
         };
@@ -2062,7 +2115,7 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Span::styled("▏", Style::default().fg(C_ACCENT)),
                 Span::styled(info, Style::default().fg(C_MUTED)),
                 Span::styled(
-                    "   Enter fijar · Esc cancelar · ↑↓ siguiente",
+                    "   Enter finish · Esc cancel · ↑↓ previous/next",
                     Style::default().fg(C_MUTED),
                 ),
             ])),
@@ -2084,34 +2137,35 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ));
         spans.push(Span::raw(" "));
     }
+    spans.extend(key_hint("F4", "docsets"));
     match app.focus {
         Focus::Search => {
             for (k, l) in [
-                ("↑↓", "navegar"),
-                ("Enter", "leer"),
+                ("↑↓", "move"),
+                ("Enter", "read"),
                 ("^D", "docset"),
-                ("^T", "tipo"),
-                ("^H/F2", "recientes"),
+                ("^T", "type"),
+                ("^H/F2", "recent"),
                 ("^F", "★"),
-                ("^Y", "copiar"),
-                ("F1", "ayuda"),
-                ("Esc", "limpiar/salir"),
+                ("^Y", "copy"),
+                ("F1", "help"),
+                ("Esc", "clear/quit"),
             ] {
                 spans.extend(key_hint(k, l));
             }
         }
         Focus::Reader => {
             for (k, l) in [
-                ("/", "buscar"),
-                ("O", "índice"),
-                ("r", "relacionados"),
+                ("/", "find"),
+                ("O", "outline"),
+                ("r", "related"),
                 ("m", "★"),
-                ("H", "recientes"),
-                ("Tab", "enlaces"),
-                ("⌫", "atrás"),
-                ("y", "copiar"),
-                ("i", "símbolos"),
-                ("?", "ayuda"),
+                ("H", "recent"),
+                ("Tab", "links"),
+                ("⌫", "back"),
+                ("y", "copy"),
+                ("i", "symbols"),
+                ("?", "help"),
             ] {
                 spans.extend(key_hint(k, l));
             }
@@ -2150,43 +2204,41 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ])
     };
     let lines = vec![
-        h("Búsqueda"),
-        k("texto", "búsqueda difusa en vivo"),
-        k("rust:Vec::push", "restringe al docset (py:, js:, ts:…)"),
-        k("fn:map  struct:", "restringe al tipo de símbolo"),
-        k("↑↓  ^N ^P", "mover selección"),
-        k("Enter  Tab  →", "leer el símbolo"),
-        k("^D  ^T  S-Tab", "elegir docset / tipo · ciclar docset"),
-        k("^H  F2  Alt+H", "favoritos y recientes (Supr olvida)"),
-        k("^F  ^O  ^R", "★ favorito · índice · relacionados"),
-        k("^Y  ^B", "copiar ejemplo · abrir en navegador"),
-        k("^W  ^U", "borrar palabra / línea"),
+        k("F4", "manage docsets"),
+        h("Search"),
+        k("text", "live fuzzy search"),
+        k("rust:Vec::push", "filter by docset (py:, js:, ts:…)"),
+        k("fn:map  struct:", "filter by symbol type"),
+        k("↑↓  ^N ^P", "move selection"),
+        k("Enter  Tab  →", "read the symbol"),
+        k("^D  ^T  S-Tab", "pick docset or type · cycle docset"),
+        k("^H  F2  Alt+H", "favorites and recent pages (Del removes)"),
+        k("^F  ^O  ^R", "★ favorite · outline · related symbols"),
+        k("^Y  ^B", "copy example · open in browser"),
+        k("^W  ^U", "delete word or line"),
         RLine::from(""),
-        h("Lector"),
-        k("j k  ↑↓  Space b", "desplazar línea / página"),
-        k("^D ^U  gg  G", "media página · inicio · fin"),
-        k("/  n  N", "buscar en la página · siguiente · anterior"),
-        k("O  gO  ^O", "índice de secciones (Enter salta)"),
-        k("r", "relacionados (otros métodos del mismo tipo)"),
-        k("m", "marcar / quitar favorito ★"),
-        k("H  ^H  F2", "favoritos y recientes"),
-        k("[ ]", "sección anterior / siguiente"),
-        k(
-            "Tab  S-Tab  Enter",
-            "enlaces: siguiente / anterior / seguir",
-        ),
-        k("⌫  h  Esc", "volver atrás en el historial"),
-        k("y  Y  s", "copiar ejemplo / todo / firma"),
-        k("o  d  t", "navegador · docset · tipo"),
-        k("i", "volver a la búsqueda"),
-        k("q  ^C", "salir"),
+        h("Reader"),
+        k("j k  ↑↓  Space b", "scroll by line or page"),
+        k("^D ^U  gg  G", "half page · start · end"),
+        k("/  n  N", "find on page · next · previous"),
+        k("O  gO  ^O", "page outline (Enter jumps)"),
+        k("r", "related symbols (methods on the same type)"),
+        k("m", "toggle favorite ★"),
+        k("H  ^H  F2", "favorites and recent pages"),
+        k("[ ]", "previous or next section"),
+        k("Tab  S-Tab  Enter", "links: next / previous / open"),
+        k("⌫  h  Esc", "go back in history"),
+        k("y  Y  s", "copy example / all / signature"),
+        k("o  d  t", "browser · docset · type"),
+        k("i", "return to search"),
+        k("q  ^C", "quit"),
         RLine::from(""),
         RLine::from(Span::styled(
-            "  Ratón: arrastra para copiar · doble clic palabra · triple línea",
+            "  Mouse: drag to copy · double-click word · triple-click line",
             Style::default().fg(C_MUTED),
         )),
         RLine::from(Span::styled(
-            "  Pulsa cualquier tecla para cerrar",
+            "  Press any key to close",
             Style::default().fg(C_MUTED),
         )),
     ];
@@ -2198,7 +2250,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(C_ACCENT))
-                    .title(" Atajos ")
+                    .title(" Shortcuts ")
                     .style(Style::default().bg(C_MANTLE)),
             ),
         rect,
